@@ -1,0 +1,83 @@
+# Declarative route targets + risk constraints. Validated by src/models.py::WatchlistFile.
+# Anything under `defaults:` can be overridden per watchlist by repeating the block.
+#
+# Money is in cents. Times are local to the airport. Dates are ISO.
+
+version: 1
+
+defaults:
+  passengers: 1
+  cabin: economy
+  currency: USD
+
+  poll:
+    times_per_day: 2            # ATPCO refiles a few times a day; more than 3 is waste
+    providers: [serpapi]        # amadeus added in Phase 3 once branded-fare mapping is tested
+
+  constraints:
+    allow_basic_economy: false  # BE is not the same product; reject unless you say otherwise
+    max_stops: 1
+    max_layover_minutes: 180
+    allow_coterminal_swap: false  # arrive JFK, depart EWR → rejected
+    reject_overnight_layover: true
+    earliest_departure_local: "06:00"
+    latest_arrival_local: "23:30"
+    allowed_carriers: []        # empty = any
+    excluded_carriers: []
+
+  # price <= reference * multiplier  ⇒ strike.
+  # References are EXTERNAL (Google's typical band, or your ceiling). Internal
+  # stats are not a reference until the dataset earns it (ARCHITECTURE.md).
+  strike:
+    monitor: { reference: typical_low, multiplier: 0.90 }  # DTD > 65: only true anomalies
+    prime:   { reference: typical_low, multiplier: 1.00 }  # 21 < DTD <= 65: the buy window
+    fence:   { reference: typical_low, multiplier: 1.15 }  # 14 < DTD <= 21: buckets closing, loosen
+    late:    { reference: ceiling,     multiplier: 1.00 }  # DTD <= 14: only your own ceiling
+
+  post_purchase:
+    credit_threshold_cents: 2500   # re-fare for credit when the drop is worth the hassle
+    dot_window_hours: 24
+
+watchlists:
+  - id: sea-sjc-thanksgiving
+    origin: SEA
+    destination: SJC
+    depart: 2026-11-25
+    return: 2026-11-29
+    ceiling_cents: 32000
+    status: watching
+    notes: Family trip. Alaska or Delta preferred; Southwest fine if bags matter.
+
+  - id: sea-ord-jan
+    origin: SEA
+    destination: ORD
+    depart: 2027-01-14
+    return: 2027-01-18
+    ceiling_cents: 38000
+    status: watching
+    constraints:
+      allow_basic_economy: false
+      max_stops: 0                 # nonstop only on this one
+      max_layover_minutes: 180
+      allow_coterminal_swap: false
+      reject_overnight_layover: true
+      earliest_departure_local: "07:00"
+      latest_arrival_local: "22:00"
+      allowed_carriers: [AS, UA]
+      excluded_carriers: []
+
+  # Example of the post-purchase state. Replace with a real purchase or delete.
+  - id: sea-jfk-march
+    origin: SEA
+    destination: JFK
+    depart: 2027-03-12
+    return: 2027-03-16
+    ceiling_cents: 45000
+    status: purchased
+    purchase:
+      purchased_at: 2026-10-15T09:30:00-07:00
+      price_cents: 41800
+      currency: USD
+      itinerary_key: 0123456789abcdef    # from the observation you bought; `fares key <id>` prints it
+      carrier: DL
+      changeable: true

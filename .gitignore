@@ -1,0 +1,27 @@
+# secrets
+.env
+*.pem
+
+# state — the DB is the asset; it is backed up by scripts/backup_db.sh, never committed
+data/*.db
+data/*.db-wal
+data/*.db-shm
+data/backups/
+
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.pytest_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+
+# streamlit
+.streamlit/secrets.toml
+
+# os / editor
+.DS_Store
+.idea/
+.vscode/
