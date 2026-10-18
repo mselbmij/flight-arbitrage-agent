@@ -140,7 +140,9 @@ def itin(t: SearchTarget, flight: str, stops: int) -> Itinerary:
     return Itinerary(slices=[Slice(segments=out), Slice(segments=[back])])
 
 
-def fare(t: SearchTarget, flight: str, stops: int, price: int, brand: FareBrand):
+def fare(
+    t: SearchTarget, flight: str, stops: int, price: int, brand: FareBrand, *, url: bool = False
+):
     return FareObservation(
         watchlist_id=t.watchlist_id,
         target_id=t.target_id,
@@ -154,6 +156,7 @@ def fare(t: SearchTarget, flight: str, stops: int, price: int, brand: FareBrand)
         fare_brand_raw="Basic" if brand is FareBrand.BASIC_ECONOMY else "Main",
         changeable=brand is not FareBrand.BASIC_ECONOMY,
         days_to_departure=0,
+        booking_url=f"https://book.example/{flight}" if url else None,
     )
 
 
@@ -171,11 +174,12 @@ def write_fixture(
     mid: int = MID,
     top: int = TOP,
     band: tuple[int, int] | None = BAND,
+    urls: bool = False,
 ) -> None:
     obs = [
-        fare(t, "331", 0, trap, FareBrand.BASIC_ECONOMY),
-        fare(t, "1553", 1, mid, FareBrand.MAIN_CABIN),
-        fare(t, "327", 0, top, FareBrand.MAIN_CABIN),
+        fare(t, "331", 0, trap, FareBrand.BASIC_ECONOMY, url=urls),
+        fare(t, "1553", 1, mid, FareBrand.MAIN_CABIN, url=urls),
+        fare(t, "327", 0, top, FareBrand.MAIN_CABIN, url=urls),
     ]
     payload = {
         "observations": [dump(o) for o in obs],
@@ -217,9 +221,11 @@ class RecordingNotifier:
     def __init__(self, channel: str | None = "ntfy") -> None:
         self.channel = channel
         self.alerts: list[Alert] = []
+        self.clicks: list[str | None] = []
 
-    def send(self, alert: Alert) -> str | None:
+    def send(self, alert: Alert, *, click: str | None = None) -> str | None:
         self.alerts.append(alert)
+        self.clicks.append(click)
         return self.channel
 
 
@@ -1305,3 +1311,117 @@ def test_select_targets_ignores_scan_provider_but_says_so(caplog: pytest.LogCapt
         got = select_targets(wl, last, now=BASE)
     assert ids(got) == [D25, D26, D24]
     assert "scan tier not implemented" in caplog.text
+
+
+# --------------------------------------------------------------------------- #
+# Phase 6: undelivered retry at run start, click URL plumbing (section 7a)
+# --------------------------------------------------------------------------- #
+
+PAUSED = wl_dict(RT, id="rt-paused", status="paused")
+
+
+def old_alert(h: Harness, key: str, age: timedelta, **kw) -> int:
+    alert_id = h.db.insert_alert(make_alert(key, at=BASE - age, **kw))
+    assert alert_id is not None
+    return alert_id
+
+
+def test_run_start_retries_a_two_hour_old_undelivered_alert_and_marks_it_delivered(h: Harness):
+    alert_id = old_alert(h, "young", timedelta(hours=2))
+    h.poll(wf_of(PAUSED), notifier=RecordingNotifier("ntfy"))
+    [row] = h.alerts()
+    assert row["id"] == alert_id
+    assert row["channel"] == "ntfy" and row["delivered_at"] is not None
+
+
+def test_run_start_leaves_an_alert_older_than_24h_alone_and_logs_the_count(
+    h: Harness, caplog: pytest.LogCaptureFixture
+):
+    old_alert(h, "old", timedelta(hours=30))
+    old_alert(h, "older", timedelta(hours=50))
+    n = RecordingNotifier("ntfy")
+    with caplog.at_level(logging.INFO, logger="src.runner.poll"):
+        h.poll(wf_of(PAUSED), notifier=n)
+    assert n.alerts == []
+    assert all(r["delivered_at"] is None for r in h.alerts())
+    assert [r.getMessage() for r in caplog.records if "left alone" in r.getMessage()] == [
+        "2 undelivered alert(s) older than 24h left alone"
+    ]
+
+
+def test_run_start_does_not_log_when_nothing_is_stale(h: Harness, caplog: pytest.LogCaptureFixture):
+    old_alert(h, "young", timedelta(hours=2))
+    with caplog.at_level(logging.INFO, logger="src.runner.poll"):
+        h.poll(wf_of(PAUSED), notifier=RecordingNotifier("ntfy"))
+    assert not [r for r in caplog.records if "left alone" in r.getMessage()]
+
+
+def test_run_start_retry_that_fails_again_stays_undelivered_and_is_not_retried_in_the_run(
+    h: Harness,
+):
+    old_alert(h, "young", timedelta(hours=2))
+    n = RecordingNotifier(None)
+    h.poll(wf_of(PAUSED), notifier=n)
+    assert len(n.alerts) == 1
+    assert h.alerts()[0]["delivered_at"] is None
+
+
+def test_run_start_retries_oldest_first_before_this_runs_own_alerts(h: Harness):
+    wf = wf_of(RT)
+    h.fixtures(wf)
+    old_alert(h, "a", timedelta(hours=5), message="first\nx")
+    old_alert(h, "b", timedelta(hours=3), message="second\nx")
+    h.poll(wf)
+    sent = [a.message.split("\n")[0] for a in h.notifier.alerts]
+    assert sent[:2] == ["first", "second"]
+    assert sent[2].startswith("BUY")
+    assert len(sent) == 3
+    assert h.db.undelivered_alerts(max_age_hours=48) == []
+
+
+def test_run_start_retry_runs_even_when_the_poll_itself_has_nothing_to_do(h: Harness):
+    old_alert(h, "young", timedelta(hours=1))
+    n = RecordingNotifier("ntfy")
+    run = h.poll(wf_of(PAUSED), notifier=n)
+    assert run.status == "ok" and run.calls_made == 0 and len(n.alerts) == 1
+
+
+def test_a_retried_alert_carries_its_observations_booking_url(h: Harness):
+    h.db.start_run(make_run("prior", started_at=BASE - timedelta(hours=3)))
+    [oid] = h.db.insert_observations(
+        [
+            make_obs(
+                "prior", observed_at=BASE - timedelta(hours=3), booking_url="https://b.example/1"
+            )
+        ]
+    )
+    old_alert(h, "with-url", timedelta(hours=2), observation_id=oid)
+    old_alert(h, "no-obs", timedelta(hours=1))
+    n = RecordingNotifier("ntfy")
+    h.poll(wf_of(PAUSED), notifier=n)
+    assert n.clicks == ["https://b.example/1", None]
+
+
+def test_the_winning_observations_booking_url_is_passed_as_click(h: Harness):
+    wf = wf_of(RT)
+    h.fixtures(wf, urls=True)
+    h.poll(wf)
+    [buy] = h.alerts(AlertKind.BUY)
+    assert h.db.observation(buy["observation_id"]).price_cents == MID  # type: ignore[union-attr]
+    assert h.notifier.clicks == ["https://book.example/1553"]
+
+
+def test_click_is_none_when_the_winning_observation_has_no_booking_url(h: Harness):
+    wf = wf_of(RT)
+    h.fixtures(wf)
+    h.poll(wf)
+    assert len(h.notifier.alerts) == 1 and h.notifier.clicks == [None]
+
+
+def test_click_is_none_for_alerts_without_an_observation(h: Harness):
+    wf = wf_of(GRID)
+    h.fixtures(wf, urls=True)
+    h.poll(wf, limits=BudgetLimits(max_per_run=1, max_per_day=100))
+    [tripped] = h.alerts(AlertKind.BUDGET_TRIPPED)
+    assert tripped["observation_id"] is None
+    assert h.notifier.clicks == ["https://book.example/1553", None]  # BUY, then BUDGET_TRIPPED

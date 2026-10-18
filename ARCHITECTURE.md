@@ -290,8 +290,9 @@ both pass.
 
 ```
 # 06:50 and 17:20 local, with up to 9 min of jitter so you don't hit providers on the hour
-50 6,17 * * *  sleep $((RANDOM % 540)); cd /opt/flight-arbitrage-agent && .venv/bin/fares poll >> ops/poll.log 2>&1
+50 6,17 * * *  sleep $(awk 'BEGIN{srand(); print int(rand()*540)}'); cd /opt/flight-arbitrage-agent && .venv/bin/fares poll --trigger cron >> ops/poll.log 2>&1
 0  3   * * *  /opt/flight-arbitrage-agent/scripts/backup_db.sh
+0  9,21 * * * cd /opt/flight-arbitrage-agent && .venv/bin/fares health >> ops/health.log 2>&1
 ```
 
 Inside one run, for each watchlist with status `watching`:
@@ -367,17 +368,24 @@ Mapping from `Alert` to the ntfy request:
 | `BUDGET_TRIPPED` | 3 | `warning` | `API budget tripped (4/4 today)` |
 | `PROVIDER_ERROR` | 2 | `x` | `serpapi failed for sea-sjc-thanksgiving` |
 
-Body = `Alert.message` (plain text, ≤ 500 chars: route, dates, price vs reference, brand, stops,
-provider + observed time). `Click` header = `booking_url` when present. `Markdown: yes` is
+`Title` header = the first line of `Alert.message`, with `→` and dashes transliterated and any
+other non-latin-1 character dropped (HTTP headers are latin-1). Body = everything after the first
+line (the title again for a one-line message), UTF-8: route, dates, price vs reference, brand,
+stops, provider + observed time. `Click` header = the `booking_url` of the observation behind the
+alert (`Notifier.send(alert, click=…)`; the runner looks it up through `alert.observation_id`). `Markdown: yes` is
 **not** used — the iOS app renders it inconsistently.
 
 Rules:
 * `delivered_at` and `channel="ntfy"` are written in the same transaction as the alert row,
-  after a 2xx. A non-2xx leaves `delivered_at` null; the next run retries undelivered alerts
-  younger than `dedup_window_hours`, then gives up and logs.
+  after a 2xx. A non-2xx leaves `delivered_at` null; the start of the next run retries undelivered
+  alerts younger than 24 h (`RETRY_WINDOW_HOURS`), oldest first, then gives up and logs the count.
 * The notifier never composes a message; `rules.py` does. The notifier formats and ships.
-* `fares alert-test` sends one `PROVIDER_ERROR`-priority ping so you can confirm the phone
-  subscription before Phase 6 goes live.
+* `fares alert-test` sends one `PROVIDER_ERROR`-priority ping (touching no DB) so you can confirm
+  the phone subscription before Phase 6 goes live. `fares health` is the external watchdog: if no
+  non-seed run started within `--max-age-hours` (default 36) it sends a `PROVIDER_ERROR`-priority
+  `fare tracker: no run in Nh` through the notifier and exits 1; it stores nothing.
+* `fares poll --notifier ntfy|log|null`; the default is ntfy when `NTFY_TOPIC` is set, else null
+  with a warning.
 * Public ntfy topics are world-readable by name. Alerts carry route, dates, prices — nothing
   secret — so a public topic is acceptable. Rotate to a reserved topic + token if that changes.
 

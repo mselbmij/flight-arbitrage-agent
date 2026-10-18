@@ -3,16 +3,19 @@
 from __future__ import annotations
 
 import re
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import httpx
 import pytest
+import respx
 import yaml
 from freezegun import freeze_time
 from typer.testing import CliRunner
 
 from src.db import Database
 from src.ingestion.mock_client import MockProvider
-from src.models import Provider, WatchlistFile
+from src.models import Provider, Run, WatchlistFile
 from src.runner.cli import app
 from tests.conftest import REPO, make_alert, make_obs, make_run
 
@@ -496,7 +499,15 @@ def poll_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("FARES_DB_PATH", str(live))
     monkeypatch.setenv("MAX_CALLS_PER_RUN", "10")
     monkeypatch.setenv("MAX_DAILY_API_CALLS", "100")
-    for var in ("SERPAPI_KEY", "AMADEUS_CLIENT_ID", "AMADEUS_CLIENT_SECRET", "AMADEUS_HOST"):
+    for var in (
+        "SERPAPI_KEY",
+        "AMADEUS_CLIENT_ID",
+        "AMADEUS_CLIENT_SECRET",
+        "AMADEUS_HOST",
+        "NTFY_SERVER",
+        "NTFY_TOPIC",
+        "NTFY_TOKEN",
+    ):
         monkeypatch.delenv(var, raising=False)
     return live
 
@@ -896,3 +907,251 @@ def test_poll_serpapi_only_on_the_live_db_is_not_blocked_by_the_amadeus_host_rul
     )  # fmt: skip
     assert res.exit_code == 0, res.output
     assert seen == [THANKS]
+
+
+# --------------------------------------------------------------------------- #
+# Phase 6: --notifier, alert-test, health (ARCHITECTURE.md sections 7, 7a)
+# --------------------------------------------------------------------------- #
+
+NTFY = "https://ntfy.example.test"
+TOPIC_URL = f"{NTFY}/fares-test"
+
+
+@pytest.fixture
+def ntfy_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("NTFY_SERVER", NTFY)
+    monkeypatch.setenv("NTFY_TOPIC", "fares-test")
+    monkeypatch.delenv("NTFY_TOKEN", raising=False)
+
+
+@pytest.fixture
+def no_ntfy_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    for var in ("NTFY_SERVER", "NTFY_TOPIC", "NTFY_TOKEN"):
+        monkeypatch.delenv(var, raising=False)
+
+
+@freeze_time(NOW)
+def test_poll_notifier_log_prints_the_buy_title_and_marks_the_alert_delivered(
+    tmp_path: Path, poll_env: Path
+):
+    args, dbp = poll_args(tmp_path)
+    res = runner.invoke(app, [*args, "--notifier", "log"])
+    assert res.exit_code == 0, res.output
+    assert re.search(r"^BUY SEA→SJC \$269 ", res.output, re.M), res.output
+    [alert] = rows(dbp, "SELECT * FROM alerts")
+    assert alert["channel"] == "log" and alert["delivered_at"] is not None
+
+
+@freeze_time(NOW)
+def test_poll_notifier_null_leaves_the_alert_undelivered_without_a_warning(
+    tmp_path: Path, poll_env: Path
+):
+    args, dbp = poll_args(tmp_path)
+    res = runner.invoke(app, [*args, "--notifier", "null"])
+    assert res.exit_code == 0, res.output
+    assert "NTFY_TOPIC" not in res.output
+    [alert] = rows(dbp, "SELECT * FROM alerts")
+    assert alert["delivered_at"] is None
+
+
+@freeze_time(NOW)
+def test_poll_without_a_topic_defaults_to_null_and_warns(tmp_path: Path, poll_env: Path):
+    args, dbp = poll_args(tmp_path)
+    res = runner.invoke(app, args)
+    assert res.exit_code == 0, res.output
+    assert "NTFY_TOPIC is not set" in res.output
+    [alert] = rows(dbp, "SELECT * FROM alerts")
+    assert alert["delivered_at"] is None
+
+
+@freeze_time(NOW)
+def test_poll_with_a_topic_defaults_to_ntfy_and_marks_delivered(
+    tmp_path: Path, poll_env: Path, ntfy_env: None
+):
+    args, dbp = poll_args(tmp_path)
+    with respx.mock(assert_all_called=False) as m:
+        route = m.post(TOPIC_URL).respond(200)
+        res = runner.invoke(app, args)
+    assert res.exit_code == 0, res.output
+    assert route.call_count == 1
+    req = route.calls.last.request
+    assert req.headers["Priority"] == "5" and req.headers["Title"].startswith("BUY SEA->SJC")
+    assert "Authorization" not in req.headers
+    [alert] = rows(dbp, "SELECT * FROM alerts")
+    assert alert["channel"] == "ntfy" and alert["delivered_at"] is not None
+
+
+@freeze_time(NOW)
+def test_poll_ntfy_failure_leaves_the_alert_undelivered_and_the_run_ok(
+    tmp_path: Path, poll_env: Path, ntfy_env: None, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setenv("NTFY_TOKEN", "tk_secret")
+    args, dbp = poll_args(tmp_path)
+    with respx.mock(assert_all_called=False) as m:
+        route = m.post(TOPIC_URL).respond(503)
+        res = runner.invoke(app, args)
+    assert res.exit_code == 0, res.output
+    assert route.calls.last.request.headers["Authorization"] == "Bearer tk_secret"
+    assert "tk_secret" not in res.output
+    [alert] = rows(dbp, "SELECT * FROM alerts")
+    assert alert["delivered_at"] is None
+
+
+@freeze_time(NOW)
+def test_poll_explicit_ntfy_without_a_topic_is_an_error_before_the_db_is_touched(
+    tmp_path: Path, poll_env: Path
+):
+    args, dbp = poll_args(tmp_path)
+    res = runner.invoke(app, [*args, "--notifier", "ntfy"])
+    assert res.exit_code == 1 and "NTFY_TOPIC" in res.output
+    assert not dbp.exists()
+
+
+def test_poll_rejects_an_unknown_notifier(tmp_path: Path, poll_env: Path):
+    args, dbp = poll_args(tmp_path)
+    assert runner.invoke(app, [*args, "--notifier", "carrier-pigeon"]).exit_code == 2
+    assert not dbp.exists()
+
+
+# -- alert-test -------------------------------------------------------------------------------- #
+
+
+def test_alert_test_with_the_log_notifier_exits_0_prints_and_creates_no_db(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, no_ntfy_env: None
+):
+    live = tmp_path / "data" / "live.db"
+    monkeypatch.setenv("FARES_DB_PATH", str(live))
+    monkeypatch.chdir(tmp_path)
+    res = runner.invoke(app, ["alert-test", "--notifier", "log"])
+    assert res.exit_code == 0, res.output
+    assert "fare tracker: test ping" in res.output and res.output.strip().endswith("log")
+    assert not live.exists() and not (tmp_path / "data").exists()
+    assert sorted(p.name for p in tmp_path.iterdir()) == []
+
+
+def test_alert_test_over_ntfy_sends_a_provider_error_priority_ping(tmp_path: Path, ntfy_env: None):
+    with respx.mock(assert_all_called=False) as m:
+        route = m.post(TOPIC_URL).respond(200)
+        res = runner.invoke(app, ["alert-test"])
+    assert res.exit_code == 0, res.output
+    assert res.output.strip() == "ntfy"
+    req = route.calls.last.request
+    assert req.headers["Priority"] == "2" and req.headers["Tags"] == "x"
+    assert req.headers["Title"] == "fare tracker: test ping"
+    assert req.content == b"If you can read this, the topic works."
+
+
+def test_alert_test_exits_1_and_says_undelivered_when_ntfy_rejects_it(ntfy_env: None):
+    with respx.mock(assert_all_called=False) as m:
+        m.post(TOPIC_URL).respond(403)
+        res = runner.invoke(app, ["alert-test"])
+    assert res.exit_code == 1 and res.output.strip() == "undelivered"
+
+
+def test_alert_test_exits_1_on_a_transport_error(ntfy_env: None):
+    with respx.mock(assert_all_called=False) as m:
+        m.post(TOPIC_URL).mock(side_effect=httpx.ConnectError("down"))
+        res = runner.invoke(app, ["alert-test"])
+    assert res.exit_code == 1 and "undelivered" in res.output
+
+
+def test_alert_test_without_a_topic_exits_1(no_ntfy_env: None):
+    res = runner.invoke(app, ["alert-test"])
+    assert res.exit_code == 1 and "NTFY_TOPIC" in res.output
+
+
+# -- health ------------------------------------------------------------------------------------ #
+
+
+def run_at(dbp: Path, hours_ago: float, run_id: str = "r1", trigger: str = "cron") -> None:
+    when = datetime.now(UTC) - timedelta(hours=hours_ago)
+    with Database(dbp) as d:
+        d.migrate()
+        d.start_run(Run(run_id=run_id, started_at=when, trigger=trigger))  # type: ignore[arg-type]
+
+
+def test_health_fresh_run_exits_0_prints_the_age_and_sends_nothing(tmp_path: Path, ntfy_env: None):
+    dbp = tmp_path / "fares.db"
+    run_at(dbp, 2)
+    with respx.mock(assert_all_called=False) as m:
+        route = m.post(TOPIC_URL).respond(200)
+        res = runner.invoke(app, ["health", "--db", str(dbp)])
+    assert res.exit_code == 0, res.output
+    assert re.search(r"last run 2\.0h ago", res.output)
+    assert not route.called
+
+
+def test_health_stale_run_alerts_and_exits_1_without_storing_an_alert(
+    tmp_path: Path, ntfy_env: None
+):
+    dbp = tmp_path / "fares.db"
+    run_at(dbp, 40)
+    with respx.mock(assert_all_called=False) as m:
+        route = m.post(TOPIC_URL).respond(200)
+        res = runner.invoke(app, ["health", "--db", str(dbp)])
+    assert res.exit_code == 1, res.output
+    req = route.calls.last.request
+    assert req.headers["Title"] == "fare tracker: no run in 36h"
+    assert req.headers["Priority"] == "2"
+    assert rows(dbp, "SELECT * FROM alerts") == []
+
+
+def test_health_max_age_hours_is_respected_and_named_in_the_title(
+    tmp_path: Path, no_ntfy_env: None
+):
+    dbp = tmp_path / "fares.db"
+    run_at(dbp, 5)
+    assert runner.invoke(app, ["health", "--db", str(dbp), "--max-age-hours", "6"]).exit_code == 0
+    res = runner.invoke(
+        app, ["health", "--db", str(dbp), "--max-age-hours", "4", "--notifier", "log"]
+    )
+    assert res.exit_code == 1
+    assert "fare tracker: no run in 4h" in res.output
+
+
+def test_health_uses_the_newest_run(tmp_path: Path, no_ntfy_env: None):
+    dbp = tmp_path / "fares.db"
+    run_at(dbp, 100, "old")
+    run_at(dbp, 1, "new")
+    assert runner.invoke(app, ["health", "--db", str(dbp)]).exit_code == 0
+
+
+def test_health_with_no_runs_alerts_and_exits_1(tmp_path: Path, no_ntfy_env: None):
+    dbp = tmp_path / "fares.db"
+    with Database(dbp) as d:
+        d.migrate()
+    res = runner.invoke(app, ["health", "--db", str(dbp), "--notifier", "log"])
+    assert res.exit_code == 1
+    assert "fare tracker: no run in 36h" in res.output and "no runs recorded" in res.output
+
+
+def test_health_with_a_missing_database_alerts_exits_1_and_does_not_create_it(
+    tmp_path: Path, no_ntfy_env: None
+):
+    dbp = tmp_path / "nope.db"
+    res = runner.invoke(app, ["health", "--db", str(dbp), "--notifier", "log"])
+    assert res.exit_code == 1 and "fare tracker: no run in 36h" in res.output
+    assert not dbp.exists()
+
+
+def test_health_ignores_seed_runs(tmp_path: Path, no_ntfy_env: None):
+    dbp = tmp_path / "fares.db"
+    run_at(dbp, 1, "seed-1", trigger="seed")
+    res = runner.invoke(app, ["health", "--db", str(dbp), "--notifier", "log"])
+    assert res.exit_code == 1
+
+
+def test_health_stale_without_a_topic_still_exits_1(tmp_path: Path, no_ntfy_env: None):
+    dbp = tmp_path / "fares.db"
+    run_at(dbp, 99)
+    res = runner.invoke(app, ["health", "--db", str(dbp)])
+    assert res.exit_code == 1 and "NTFY_TOPIC" in res.output
+
+
+def test_health_still_exits_1_when_ntfy_is_down(tmp_path: Path, ntfy_env: None):
+    dbp = tmp_path / "fares.db"
+    run_at(dbp, 99)
+    with respx.mock(assert_all_called=False) as m:
+        m.post(TOPIC_URL).respond(500)
+        res = runner.invoke(app, ["health", "--db", str(dbp)])
+    assert res.exit_code == 1

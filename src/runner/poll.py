@@ -39,13 +39,17 @@ from src.models import (
 log = logging.getLogger(__name__)
 
 DEDUP_WINDOW_HOURS = 24
+#: Undelivered alerts older than this are given up on (section 7a).
+RETRY_WINDOW_HOURS = DEDUP_WINDOW_HOURS
+_ANCIENT_HOURS = 24 * 365 * 20
 _EPOCH = datetime.min.replace(tzinfo=UTC)
 _MAX_ERROR_CHARS = 200
 
 
 class Notifier(Protocol):
-    def send(self, alert: Alert) -> str | None:
-        """Deliver the alert. Returns the channel name on success, None on failure or no-op."""
+    def send(self, alert: Alert, *, click: str | None = None) -> str | None:
+        """Deliver the alert; `click` is the booking URL of the observation that caused it.
+        Returns the channel name on success, None on failure or no-op."""
         ...
 
 
@@ -53,7 +57,7 @@ class NullNotifier:
     """Phase 5 default: logs the title and reports no channel, so the alert stays undelivered
     and the Phase 6 notifier can retry it."""
 
-    def send(self, alert: Alert) -> str | None:
+    def send(self, alert: Alert, *, click: str | None = None) -> str | None:
         log.info("alert (not delivered): %s", alert.message.split("\n", 1)[0])
         return None
 
@@ -124,6 +128,7 @@ def run_poll(
 ) -> Run:
     run_id = run_id or uuid4().hex
     db.migrate()
+    _retry_undelivered(db, notifier)
     db.start_run(Run(run_id=run_id, started_at=now(), trigger=trigger))
     poller = _Poller(db, providers, limits, notifier, raw_dir, now, run_id, wf.config_hash())
     try:
@@ -135,6 +140,28 @@ def run_poll(
     run = db.get_run(run_id)
     assert run is not None
     return run
+
+
+def _click_for(db: Database, alert: Alert) -> str | None:
+    """The booking URL of the observation behind `alert`, when it has one."""
+    if alert.observation_id is None:
+        return None
+    obs = db.observation(alert.observation_id)
+    return None if obs is None else obs.booking_url
+
+
+def _retry_undelivered(db: Database, notifier: Notifier) -> None:
+    """Section 7a: give alerts whose delivery failed earlier one more chance, then give up."""
+    for alert in db.undelivered_alerts(max_age_hours=RETRY_WINDOW_HOURS):
+        assert alert.id is not None
+        channel = notifier.send(alert, click=_click_for(db, alert))
+        if channel:
+            db.mark_delivered(alert.id, channel)
+    stale = len(db.undelivered_alerts(max_age_hours=_ANCIENT_HOURS)) - len(
+        db.undelivered_alerts(max_age_hours=RETRY_WINDOW_HOURS)
+    )
+    if stale:
+        log.info("%d undelivered alert(s) older than %dh left alone", stale, RETRY_WINDOW_HOURS)
 
 
 class _Poller:
@@ -284,7 +311,8 @@ class _Poller:
         alert_id = self.db.insert_alert(alert, dedup_window_hours=DEDUP_WINDOW_HOURS)
         if alert_id is None:
             return  # same alert_key inside the window
-        channel = self.notifier.send(alert.model_copy(update={"id": alert_id}))
+        stored = alert.model_copy(update={"id": alert_id})
+        channel = self.notifier.send(stored, click=_click_for(self.db, stored))
         if channel:
             self.db.mark_delivered(alert_id, channel)
 

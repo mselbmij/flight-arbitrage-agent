@@ -1,12 +1,14 @@
-"""`fares` CLI (ARCHITECTURE.md section 7): migrate, seed, targets, budget, key.
+"""`fares` CLI (ARCHITECTURE.md sections 7, 7a): migrate, seed, targets, poll, budget, key,
+alert-test, health.
 
 Environment is read when a command runs, never at import time. Every command that touches the
 database applies migrations first.
 """
 
+import logging
 import os
 import sqlite3
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from pathlib import Path
 from typing import Annotated
@@ -15,15 +17,18 @@ import typer
 import yaml
 from dotenv import load_dotenv
 
+from src.alerts.notifier import LogNotifier, NtfyNotifier
 from src.db import BudgetLimits, Database, utcnow
 from src.engine.rules import fmt_money
 from src.ingestion.amadeus_client import AmadeusProvider
 from src.ingestion.mock_client import MockProvider
 from src.ingestion.serpapi_client import SerpApiProvider
-from src.models import Provider, ResolvedWatchlist, WatchlistFile
+from src.models import Alert, AlertKind, Provider, Regime, ResolvedWatchlist, WatchlistFile
 from src.runner.demo import demo_watchlist_file, write_demo_config
-from src.runner.poll import NullNotifier, ProviderRegistry, run_poll
+from src.runner.poll import Notifier, NullNotifier, ProviderRegistry, run_poll
 from src.runner.seed import SeedScenario, generate
+
+log = logging.getLogger(__name__)
 
 app = typer.Typer(help="Risk-aware airline fare tracker.", no_args_is_help=True)
 
@@ -35,6 +40,8 @@ DEFAULT_RAW_DIR = "data/raw"
 # Budget defaults (ARCHITECTURE.md section 6), shared by `fares poll` and `fares budget`.
 DEFAULT_MAX_CALLS_PER_RUN = 2
 DEFAULT_MAX_DAILY_API_CALLS = 3
+DEFAULT_NTFY_SERVER = "https://ntfy.sh"
+DEFAULT_HEALTH_MAX_AGE_HOURS = 36
 
 DbOpt = Annotated[Path | None, typer.Option("--db", help="SQLite path (default $FARES_DB_PATH).")]
 ConfigOpt = Annotated[
@@ -48,6 +55,50 @@ def _db_path(db: Path | None) -> Path:
     path = db or Path(os.environ.get("FARES_DB_PATH", DEFAULT_DB))
     path.parent.mkdir(parents=True, exist_ok=True)
     return path
+
+
+class NotifierChoice(StrEnum):
+    NTFY = "ntfy"
+    LOG = "log"
+    NULL = "null"
+
+
+class PingNotifierChoice(StrEnum):
+    NTFY = "ntfy"
+    LOG = "log"
+
+
+def _ntfy_from_env() -> NtfyNotifier | None:
+    """NTFY_SERVER / NTFY_TOPIC / NTFY_TOKEN; None when no topic is configured."""
+    topic = os.environ.get("NTFY_TOPIC")
+    if not topic:
+        return None
+    return NtfyNotifier(
+        os.environ.get("NTFY_SERVER") or DEFAULT_NTFY_SERVER,
+        topic,
+        os.environ.get("NTFY_TOKEN") or None,
+    )
+
+
+def _notifier(choice: NotifierChoice | PingNotifierChoice | None) -> Notifier:
+    """Build the notifier for `--notifier`. None = the poll default: ntfy when NTFY_TOPIC is
+    set, otherwise the null notifier with a warning. An explicit `ntfy` without a topic is
+    an error, never a silent downgrade."""
+    load_dotenv()
+    if choice == NotifierChoice.NULL:
+        return NullNotifier()
+    if choice == NotifierChoice.LOG:
+        return LogNotifier()
+    ntfy = _ntfy_from_env()
+    if ntfy is not None:
+        return ntfy
+    if choice is None:
+        msg = "NTFY_TOPIC is not set: alerts are stored undelivered (use --notifier log to print)"
+        log.warning(msg)
+        typer.echo(f"warning: {msg}", err=True)
+        return NullNotifier()
+    typer.echo("error: --notifier ntfy needs NTFY_TOPIC (see .env.example)", err=True)
+    raise typer.Exit(1)
 
 
 def _load(config: Path) -> WatchlistFile:
@@ -282,6 +333,13 @@ def poll(
             "credentials on a non-production AMADEUS_HOST.",
         ),
     ] = False,
+    notifier: Annotated[
+        NotifierChoice | None,
+        typer.Option(
+            "--notifier",
+            help="ntfy | log | null. Default: ntfy when NTFY_TOPIC is set, else null (warns).",
+        ),
+    ] = None,
 ) -> None:
     """Run one poll: every pollable target, every provider, risk filters, rules, alerts.
 
@@ -307,6 +365,7 @@ def poll(
         raise typer.Exit(1)
 
     wf = _load(config)
+    sink = _notifier(notifier)
     if provider_override is not None:
         assert fixtures is not None
         wf = _with_mock_only(wf)
@@ -347,7 +406,7 @@ def poll(
                 wf,
                 registry,
                 limits=limits,
-                notifier=NullNotifier(),
+                notifier=sink,
                 raw_dir=raw_dir,
                 trigger=trigger.value,  # type: ignore[arg-type]
                 now=utcnow,
@@ -435,6 +494,83 @@ def key(obs_id: int, db: DbOpt = None) -> None:
         raise typer.Exit(1)
     typer.echo(f"itinerary_key: {obs.itinerary_key}")
     typer.echo(f"target_id: {obs.target_id}")
+
+
+@app.command("alert-test")
+def alert_test(
+    notifier: Annotated[
+        PingNotifierChoice, typer.Option("--notifier", help="ntfy | log.")
+    ] = PingNotifierChoice.NTFY,
+) -> None:
+    """Send one PROVIDER_ERROR-priority ping; exit 0 if delivered, 1 if not. Never touches the DB.
+
+    Run it before installing cron: confirms the phone is subscribed to the topic."""
+    sink = _notifier(notifier)
+    alert = Alert(
+        created_at=utcnow(),
+        watchlist_id="fare-tracker",
+        kind=AlertKind.PROVIDER_ERROR,
+        regime=Regime.MONITOR,
+        message="fare tracker: test ping\nIf you can read this, the topic works.",
+        alert_key="fare-tracker:alert-test",
+    )
+    channel = sink.send(alert)
+    typer.echo(channel or "undelivered")
+    if channel is None:
+        raise typer.Exit(1)
+
+
+def _latest_run_start(path: Path) -> datetime | None:
+    """started_at of the newest non-seed run, or None. Read-only: a missing file, an unmigrated
+    one and an empty one all mean 'no runs', and none of them is created or written."""
+    if not path.exists():
+        return None
+    con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        row = con.execute("SELECT MAX(started_at) FROM runs WHERE \"trigger\" != 'seed'").fetchone()
+    except sqlite3.OperationalError:  # no runs table yet
+        return None
+    finally:
+        con.close()
+    return None if row[0] is None else datetime.fromisoformat(row[0])
+
+
+@app.command()
+def health(
+    db: DbOpt = None,
+    max_age_hours: Annotated[
+        int, typer.Option("--max-age-hours", min=1, help="Alert when the last run is older.")
+    ] = DEFAULT_HEALTH_MAX_AGE_HOURS,
+    notifier: Annotated[
+        PingNotifierChoice, typer.Option("--notifier", help="ntfy | log.")
+    ] = PingNotifierChoice.NTFY,
+) -> None:
+    """Watchdog for a silently dead runner: alert and exit 1 if no run started in the last
+    --max-age-hours (or ever). Stateless: reads the DB, writes nothing, stores no alert."""
+    path = _db_path(db)
+    latest = _latest_run_start(path)
+    now = utcnow()
+    if latest is not None and now - latest <= timedelta(hours=max_age_hours):
+        age = (now - latest).total_seconds() / 3600
+        typer.echo(f"ok: last run {age:.1f}h ago (limit {max_age_hours}h)")
+        return
+    title = f"fare tracker: no run in {max_age_hours}h"
+    detail = (
+        f"no runs recorded in {path}"
+        if latest is None
+        else f"last run started {latest.astimezone(UTC):%Y-%m-%d %H:%M} UTC"
+    )
+    typer.echo(f"STALE: {title} ({detail})", err=True)
+    alert = Alert(
+        created_at=now,
+        watchlist_id="fare-tracker",
+        kind=AlertKind.PROVIDER_ERROR,
+        regime=Regime.MONITOR,
+        message=f"{title}\n{detail}",
+        alert_key="fare-tracker:health",
+    )
+    _notifier(notifier).send(alert)
+    raise typer.Exit(1)
 
 
 if __name__ == "__main__":
