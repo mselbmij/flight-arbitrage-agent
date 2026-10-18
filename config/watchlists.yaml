@@ -1,7 +1,12 @@
-# Declarative route targets + risk constraints. Validated by src/models.py::WatchlistFile.
+# Declarative route grids + risk constraints. Validated by src/models.py::WatchlistFile.
 # Anything under `defaults:` can be overridden per watchlist by repeating the block.
 #
 # Money is in cents. Times are local to the airport. Dates are ISO.
+#
+# A watchlist is a GRID: origin(s) × destination(s) × depart date(s) × return/trip length.
+# It expands to concrete search targets (cap: 60 per watchlist). Each run polls
+# `targets_per_run` of them, least-recently-polled first. Run `fares targets` to see
+# the expansion and `fares budget` to see calls/day before you commit a change.
 
 version: 1
 
@@ -12,7 +17,9 @@ defaults:
 
   poll:
     times_per_day: 2            # ATPCO refiles a few times a day; more than 3 is waste
-    providers: [serpapi]        # amadeus added in Phase 3 once branded-fare mapping is tested
+    providers: [serpapi]        # amadeus added in Phase 4 once branded-fare mapping is tested
+    targets_per_run: 2          # × providers × times_per_day = calls/day for this watchlist
+    scan_provider: null         # amadeus cheapest-date scan, Phase 4; one call per O-D pair
 
   constraints:
     allow_basic_economy: false  # BE is not the same product; reject unless you say otherwise
@@ -39,6 +46,7 @@ defaults:
     dot_window_hours: 24
 
 watchlists:
+  # Simple case: one route, fixed dates. Expands to 1 target.
   - id: sea-sjc-thanksgiving
     origin: SEA
     destination: SJC
@@ -48,6 +56,23 @@ watchlists:
     status: watching
     notes: Family trip. Alaska or Delta preferred; Southwest fine if bags matter.
 
+  # Flexible destination + trip length: SEA → any Bay Area airport, leave Thu or Fri
+  # in a one-week window, stay 3–4 nights.  3 dests × 2 dates × 2 lengths = 12 targets.
+  # At targets_per_run=3, 2×/day, every target is refreshed every 2 days.
+  - id: sea-bayarea-jan-flex
+    origin: SEA
+    destination: [SJC, SFO, OAK]
+    depart: { start: 2027-01-14, end: 2027-01-20, weekdays: [3, 4] }   # 0=Mon … 6=Sun
+    trip_length: { min_days: 3, max_days: 4 }
+    ceiling_cents: 24000
+    status: watching
+    poll:
+      times_per_day: 2
+      providers: [serpapi]
+      targets_per_run: 3
+      scan_provider: null
+
+  # Fixed dates, nonstop only, carrier-restricted. 1 target.
   - id: sea-ord-jan
     origin: SEA
     destination: ORD
@@ -57,7 +82,7 @@ watchlists:
     status: watching
     constraints:
       allow_basic_economy: false
-      max_stops: 0                 # nonstop only on this one
+      max_stops: 0
       max_layover_minutes: 180
       allow_coterminal_swap: false
       reject_overnight_layover: true
@@ -66,10 +91,11 @@ watchlists:
       allowed_carriers: [AS, UA]
       excluded_carriers: []
 
-  # Example of the post-purchase state. Replace with a real purchase or delete.
+  # Post-purchase example. A purchase pins ONE target_id; only that target is polled.
+  # Replace with a real purchase or delete.
   - id: sea-jfk-march
     origin: SEA
-    destination: JFK
+    destination: [JFK, EWR]
     depart: 2027-03-12
     return: 2027-03-16
     ceiling_cents: 45000
@@ -78,6 +104,7 @@ watchlists:
       purchased_at: 2026-10-15T09:30:00-07:00
       price_cents: 41800
       currency: USD
-      itinerary_key: 0123456789abcdef    # from the observation you bought; `fares key <id>` prints it
+      itinerary_key: 0123456789abcdef          # from the observation you bought; `fares key <obs id>`
+      target_id: sea-jfk-march:SEAJFK:2027-03-12:2027-03-16
       carrier: DL
       changeable: true

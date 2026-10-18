@@ -18,7 +18,7 @@ Design rules enforced by these models (ARCHITECTURE.md explains each):
 from __future__ import annotations
 
 import hashlib
-from datetime import UTC, date, datetime, time
+from datetime import UTC, date, datetime, time, timedelta
 from enum import StrEnum
 from typing import Annotated, Any, Literal, Self
 
@@ -194,6 +194,15 @@ class PollConfig(BaseModel):
     #: Legacy carriers refile fares a few times a day via ATPCO; >3 is waste.
     times_per_day: int = Field(default=2, ge=1, le=4)
     providers: list[Provider] = Field(default_factory=lambda: [Provider.SERPAPI])
+    #: How many concrete SearchTargets of this watchlist one run may poll.
+    #: Targets are visited round-robin by least-recently-polled, so every target
+    #: is refreshed every ceil(n_targets / targets_per_run) runs.
+    targets_per_run: int = Field(default=2, ge=1, le=20)
+    #: Optional cheap parametric scan (Amadeus cheapest-date / inspiration
+    #: endpoints: one call per origin-destination pair, returns a date grid).
+    #: When set, the scan runs first and its cheapest dates are polled before
+    #: the round-robin continues. None = no scan tier.
+    scan_provider: Provider | None = None
 
 
 class PostPurchaseConfig(BaseModel):
@@ -218,6 +227,9 @@ class Purchase(BaseModel):
     price_cents: Cents
     currency: str = "USD"
     itinerary_key: str = Field(min_length=12, max_length=40)
+    #: Which concrete target you bought (`fares targets <watchlist_id>` lists them).
+    #: Post-purchase polling is restricted to this one.
+    target_id: str = Field(min_length=8, max_length=80)
     carrier: CarrierCode
     changeable: bool = True  # Basic Economy would be False → credit harvesting impossible
 
@@ -251,18 +263,127 @@ class Defaults(BaseModel):
     post_purchase: PostPurchaseConfig = Field(default_factory=PostPurchaseConfig)
 
 
+#: Hard cap on grid expansion per watchlist. A grid this size cannot be polled
+#: daily on any sane budget; the cap exists so a typo in a date window fails at
+#: load time instead of silently starving every other watchlist.
+MAX_TARGETS_PER_WATCHLIST = 60
+
+
+class DateWindow(BaseModel):
+    """Inclusive date range, optionally restricted to weekdays (0=Mon .. 6=Sun)."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    start: date
+    end: date
+    weekdays: list[Annotated[int, Field(ge=0, le=6)]] | None = None
+
+    @model_validator(mode="after")
+    def _ordered(self) -> Self:
+        if self.end < self.start:
+            raise ValueError("DateWindow.end before start")
+        return self
+
+    def dates(self) -> list[date]:
+        out = []
+        d = self.start
+        while d <= self.end:
+            if self.weekdays is None or d.weekday() in self.weekdays:
+                out.append(d)
+            d += timedelta(days=1)
+        return out
+
+
+class TripLength(BaseModel):
+    """Return = depart + N days for N in [min_days, max_days]. Alternative to an
+    explicit return date/window."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    min_days: int = Field(ge=1, le=90)
+    max_days: int = Field(ge=1, le=90)
+
+    @model_validator(mode="after")
+    def _ordered(self) -> Self:
+        if self.max_days < self.min_days:
+            raise ValueError("TripLength.max_days < min_days")
+        return self
+
+
+class SearchTarget(BaseModel):
+    """One concrete (origin, destination, depart, return) a provider can be asked
+    about. Derived from a Watchlist grid; never written by hand.
+
+    target_id is deterministic so observations survive YAML edits that don't
+    change the leg itself."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    watchlist_id: Slug
+    origin: IATA
+    destination: IATA
+    depart: date
+    return_: date | None = None
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def target_id(self) -> str:
+        ret = self.return_.isoformat() if self.return_ else "ow"
+        return (
+            f"{self.watchlist_id}:{self.origin}{self.destination}:{self.depart.isoformat()}:{ret}"
+        )
+
+    @property
+    def is_round_trip(self) -> bool:
+        return self.return_ is not None
+
+    @property
+    def trip_length_days(self) -> int | None:
+        return (self.return_ - self.depart).days if self.return_ else None
+
+    def days_to_departure(self, now: datetime | None = None) -> int:
+        now = now or datetime.now(UTC)
+        return (self.depart - now.date()).days
+
+    def regime(self, now: datetime | None = None) -> Regime:
+        dtd = self.days_to_departure(now)
+        if dtd < 0:
+            return Regime.EXPIRED
+        if dtd > 65:
+            return Regime.MONITOR
+        if dtd > 21:
+            return Regime.PRIME
+        if dtd > 14:
+            return Regime.FENCE
+        return Regime.LATE
+
+
+def _as_list(v: str | list[str]) -> list[str]:
+    return [v] if isinstance(v, str) else list(v)
+
+
 class Watchlist(BaseModel):
-    """One route + date pair as written in YAML. Optional fields fall back to
-    `defaults:` — see WatchlistFile.resolved()."""
+    """A route *grid* as written in YAML. Scalars and lists/windows are both
+    accepted so the simple case stays one line per field:
+
+        origin: SEA                      origin: [SEA, PDX]
+        destination: SJC                 destination: [SJC, SFO, OAK]
+        depart: 2026-11-25               depart: {start: 2026-11-20, end: 2026-11-26, weekdays: [2, 3]}
+        return: 2026-11-29               trip_length: {min_days: 3, max_days: 5}
+
+    Expansion is the cartesian product; MAX_TARGETS_PER_WATCHLIST caps it.
+    Optional fields fall back to `defaults:` — see WatchlistFile.resolved()."""
 
     model_config = ConfigDict(extra="forbid")
 
     id: Slug
-    origin: IATA
-    destination: IATA
-    depart: date
-    return_: date | None = Field(default=None, alias="return")
+    origin: IATA | list[IATA] = Field(min_length=1)
+    destination: IATA | list[IATA] = Field(min_length=1)
+    depart: date | DateWindow
+    return_: date | DateWindow | None = Field(default=None, alias="return")
+    trip_length: TripLength | None = None
     #: "I would happily pay this." Absolute strike in LATE regime; always alerts if hit.
+    #: One ceiling for the whole grid — if SFO is worth more to you than OAK, make two watchlists.
     ceiling_cents: Cents
     status: WatchStatus = WatchStatus.WATCHING
     purchase: Purchase | None = None
@@ -277,37 +398,92 @@ class Watchlist(BaseModel):
     post_purchase: PostPurchaseConfig | None = None
     notes: str | None = None
 
+    @property
+    def origins(self) -> list[str]:
+        return _as_list(self.origin)
+
+    @property
+    def destinations(self) -> list[str]:
+        return _as_list(self.destination)
+
+    @property
+    def depart_dates(self) -> list[date]:
+        return [self.depart] if isinstance(self.depart, date) else self.depart.dates()
+
+    def expand(self) -> list[SearchTarget]:
+        targets: list[SearchTarget] = []
+        for o in self.origins:
+            for d in self.destinations:
+                for dep in self.depart_dates:
+                    if self.trip_length is not None:
+                        rets: list[date | None] = [
+                            dep + timedelta(days=n)
+                            for n in range(self.trip_length.min_days, self.trip_length.max_days + 1)
+                        ]
+                    elif self.return_ is None:
+                        rets = [None]
+                    elif isinstance(self.return_, date):
+                        rets = [self.return_]
+                    else:
+                        rets = [r for r in self.return_.dates() if r > dep]
+                    for ret in rets:
+                        targets.append(
+                            SearchTarget(
+                                watchlist_id=self.id,
+                                origin=o,
+                                destination=d,
+                                depart=dep,
+                                return_=ret,
+                            )
+                        )
+        return targets
+
     @model_validator(mode="after")
     def _sanity(self) -> Self:
-        if self.origin == self.destination:
-            raise ValueError(f"{self.id}: origin and destination are the same")
-        if coterminal_group(self.origin) and coterminal_group(self.origin) == coterminal_group(
-            self.destination
-        ):
-            raise ValueError(f"{self.id}: origin and destination are co-terminal")
-        if self.return_ is not None and self.return_ <= self.depart:
-            raise ValueError(f"{self.id}: return must be after depart")
+        if len(set(self.origins)) != len(self.origins):
+            raise ValueError(f"{self.id}: duplicate origins")
+        if len(set(self.destinations)) != len(self.destinations):
+            raise ValueError(f"{self.id}: duplicate destinations")
+        for o in self.origins:
+            for d in self.destinations:
+                if o == d:
+                    raise ValueError(f"{self.id}: {o} appears as both origin and destination")
+                if coterminal_group(o) and coterminal_group(o) == coterminal_group(d):
+                    raise ValueError(f"{self.id}: {o} and {d} are co-terminal")
+        if self.trip_length is not None and self.return_ is not None:
+            raise ValueError(f"{self.id}: give either return or trip_length, not both")
+        if isinstance(self.return_, date):
+            if any(self.return_ <= dep for dep in self.depart_dates):
+                raise ValueError(f"{self.id}: return must be after every depart date")
         if self.status is WatchStatus.PURCHASED and self.purchase is None:
             raise ValueError(f"{self.id}: status=purchased requires a purchase block")
         if self.status is not WatchStatus.PURCHASED and self.purchase is not None:
             raise ValueError(f"{self.id}: purchase block present but status != purchased")
+        targets = self.expand()
+        if not targets:
+            raise ValueError(f"{self.id}: grid expands to zero targets (check return window)")
+        if len(targets) > MAX_TARGETS_PER_WATCHLIST:
+            raise ValueError(
+                f"{self.id}: grid expands to {len(targets)} targets; "
+                f"cap is {MAX_TARGETS_PER_WATCHLIST}. Narrow the window or split the watchlist."
+            )
+        if self.purchase is not None and self.purchase.target_id not in {
+            t.target_id for t in targets
+        }:
+            raise ValueError(
+                f"{self.id}: purchase.target_id is not one of this watchlist's targets"
+            )
         return self
-
-    @property
-    def is_round_trip(self) -> bool:
-        return self.return_ is not None
 
 
 class ResolvedWatchlist(BaseModel):
-    """Watchlist with every default filled. This is what the engine consumes."""
+    """Watchlist with every default filled and the grid expanded. This is what
+    the engine consumes."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     id: Slug
-    origin: IATA
-    destination: IATA
-    depart: date
-    return_: date | None
+    targets: list[SearchTarget]
     ceiling_cents: Cents
     status: WatchStatus
     purchase: Purchase | None
@@ -320,23 +496,20 @@ class ResolvedWatchlist(BaseModel):
     post_purchase: PostPurchaseConfig
     notes: str | None
 
-    def days_to_departure(self, now: datetime | None = None) -> int:
-        now = now or datetime.now(UTC)
-        return (self.depart - now.date()).days
+    @property
+    def pollable_targets(self) -> list[SearchTarget]:
+        """Targets a run may spend budget on: all unexpired ones, or only the
+        purchased one after purchase."""
+        if self.status is WatchStatus.PURCHASED and self.purchase is not None:
+            return [t for t in self.targets if t.target_id == self.purchase.target_id]
+        if self.status is not WatchStatus.WATCHING:
+            return []
+        return [t for t in self.targets if t.regime() is not Regime.EXPIRED]
 
-    def regime(self, now: datetime | None = None) -> Regime:
+    def regime_for(self, target: SearchTarget, now: datetime | None = None) -> Regime:
         if self.status is WatchStatus.PURCHASED:
             return Regime.POST_PURCHASE
-        dtd = self.days_to_departure(now)
-        if dtd < 0:
-            return Regime.EXPIRED
-        if dtd > 65:
-            return Regime.MONITOR
-        if dtd > 21:
-            return Regime.PRIME
-        if dtd > 14:
-            return Regime.FENCE
-        return Regime.LATE
+        return target.regime(now)
 
     def strike_rule(self, regime: Regime) -> StrikeRule | None:
         return {
@@ -364,6 +537,16 @@ class WatchlistFile(BaseModel):
             raise ValueError(f"duplicate watchlist ids: {sorted(dupes)}")
         return self
 
+    def calls_per_day(self) -> int:
+        """Worst-case provider calls/day this config asks for. Compare to
+        MAX_DAILY_API_CALLS before you commit a change."""
+        total = 0
+        for r in self.resolved():
+            n = min(r.poll.targets_per_run, len(r.pollable_targets))
+            per_run = n * len(r.poll.providers) + (1 if r.poll.scan_provider else 0)
+            total += per_run * r.poll.times_per_day
+        return total
+
     def resolved(self) -> list[ResolvedWatchlist]:
         out: list[ResolvedWatchlist] = []
         d = self.defaults
@@ -371,10 +554,7 @@ class WatchlistFile(BaseModel):
             out.append(
                 ResolvedWatchlist(
                     id=w.id,
-                    origin=w.origin,
-                    destination=w.destination,
-                    depart=w.depart,
-                    return_=w.return_,
+                    targets=w.expand(),
                     ceiling_cents=w.ceiling_cents,
                     status=w.status,
                     purchase=w.purchase,
@@ -536,6 +716,7 @@ class FareObservation(BaseModel):
 
     id: int | None = None  # assigned by SQLite
     watchlist_id: Slug
+    target_id: str
     observed_at: datetime  # UTC
     provider: Provider
     run_id: str
@@ -574,6 +755,7 @@ class BenchmarkBand(BaseModel):
 
     id: int | None = None
     watchlist_id: Slug
+    target_id: str
     observed_at: datetime
     provider: Provider
     run_id: str
@@ -628,6 +810,7 @@ class ApiCall(BaseModel):
     provider: Provider
     endpoint: str
     watchlist_id: Slug | None = None
+    target_id: str | None = None
     status: ApiCallStatus
     cost_units: int = Field(default=1, ge=0)
     latency_ms: int | None = None
@@ -642,6 +825,7 @@ class Alert(BaseModel):
     id: int | None = None
     created_at: datetime
     watchlist_id: Slug
+    target_id: str | None = None  # None for watchlist-level kinds (BUDGET_TRIPPED)
     kind: AlertKind
     regime: Regime
     observation_id: int | None = None
