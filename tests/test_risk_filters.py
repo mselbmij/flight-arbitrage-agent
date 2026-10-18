@@ -412,3 +412,35 @@ def test_round_trip_target_with_outbound_only_itinerary_is_flagged_inbound_unver
     v = risk_verdict(outbound_only, wl, config_hash="h")
     assert v.inbound_unverified is True
     assert v.passed is True  # it is a flag, not a rejection
+
+
+def test_inbound_unverified_fails_closed_when_the_target_lookup_misses():
+    """An observation whose target_id is not in the watchlist is assumed to be a round trip."""
+    wl = thanksgiving()
+    stray = make_obs(target_id="gone:SEASJC:2026-11-25:2026-11-29", watchlist_id=wl.id)
+    assert risk_verdict(stray, wl, config_hash="h").inbound_unverified is False  # 2 slices
+    one_slice = stray.model_copy(
+        update={"itinerary": Itinerary(slices=[stray.itinerary.slices[0]])}
+    )
+    assert risk_verdict(one_slice, wl, config_hash="h").inbound_unverified is True
+    assert risk_verdict(one_slice, wl, config_hash="h").passed is True  # a flag, not a rejection
+
+
+def test_one_way_target_with_one_slice_is_not_inbound_unverified():
+    from src.models import WatchlistFile
+
+    raw = {
+        "id": "one-way",
+        "origin": "SEA",
+        "destination": "SJC",
+        "depart": "2026-11-25",
+        "ceiling_cents": 20000,
+    }
+    wl = WatchlistFile.model_validate({"version": 1, "watchlists": [raw]}).resolved()[0]
+    target = wl.targets[0]
+    assert not target.is_round_trip
+    one_way = make_obs(target_id=target.target_id, watchlist_id=wl.id)
+    one_way = one_way.model_copy(
+        update={"itinerary": Itinerary(slices=[one_way.itinerary.slices[0]])}
+    )
+    assert risk_verdict(one_way, wl, config_hash="h").inbound_unverified is False

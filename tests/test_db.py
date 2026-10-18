@@ -79,16 +79,33 @@ def test_migrate_on_two_objects_same_path_second_applies_nothing(db_path: Path):
 
 
 def test_migrate_upgrades_a_v001_database_in_place(db_path: Path):
-    """A DB created before 002 gains the new column without losing rows."""
-    import sqlite3
-
+    """A DB created before 002 gains the new column and keeps (and can read) its old rows."""
+    obs = make_obs("old-run", price=31234)
     con = sqlite3.connect(db_path)
     con.executescript((MIGRATIONS_DIR / "001_initial.sql").read_text())
     con.execute("INSERT INTO schema_migrations (version, applied_at) VALUES ('001', 'x')")
+    con.execute(
+        'INSERT INTO runs (run_id, started_at, "trigger", status) '
+        "VALUES ('old-run', '2026-10-17T12:00:00+00:00', 'manual', 'ok')"
+    )
+    con.execute(
+        "INSERT INTO observations (watchlist_id, target_id, observed_at, provider, run_id, "
+        "itinerary_key, itinerary_json, price_cents, currency, fare_brand, days_to_departure, "
+        "risk_passed, risk_rejections_json, risk_brand_unverified, risk_config_hash) "
+        "VALUES (?, ?, '2026-10-17T12:00:00+00:00', 'mock', 'old-run', ?, ?, 31234, 'USD', "
+        "'main_cabin', 39, 1, '[]', 0, 'h1')",
+        (
+            obs.watchlist_id,
+            obs.target_id,
+            obs.itinerary_key,
+            obs.itinerary.model_dump_json(exclude={"itinerary_key"}),
+        ),
+    )
     con.commit()
     con.close()
     with Database(db_path) as d:
         applied = d.migrate()
+        survivor = d.observations_for(TID)
     assert applied == [
         v
         for v in sorted(p.name.split("_", 1)[0] for p in MIGRATIONS_DIR.glob("*.sql"))
@@ -96,6 +113,10 @@ def test_migrate_upgrades_a_v001_database_in_place(db_path: Path):
     ]
     cols = {r[1] for r in sql(db_path, "PRAGMA table_info(observations)")}
     assert "risk_inbound_unverified" in cols
+    [old] = survivor
+    assert old.price_cents == 31234
+    assert old.risk is not None and old.risk.passed
+    assert old.risk.inbound_unverified is False  # NULL in the old row reads as False
 
 
 def test_migrate_race_on_a_fresh_file_neither_raises(db_path: Path):
@@ -279,6 +300,20 @@ def test_roundtrip_observation_without_risk_verdict(db: Database):
     (oid,) = db.insert_observations([obs])
     got = db.observation(oid)
     assert got is not None and got.risk is None
+
+
+@pytest.mark.parametrize("flag", [True, False])
+def test_roundtrip_observation_inbound_unverified(db: Database, flag: bool):
+    obs = make_obs(
+        risk=RiskVerdict(passed=True, config_hash="h1", inbound_unverified=flag),
+    )
+    db.start_run(make_run())
+    (oid,) = db.insert_observations([obs])
+    got = db.observation(oid)
+    assert got is not None and got.risk is not None
+    assert got.risk.inbound_unverified is flag
+    stored = sql(db.path, "SELECT risk_inbound_unverified FROM observations WHERE id=?", oid)
+    assert stored == [(int(flag),)]
 
 
 def test_observation_unknown_id_returns_none(db: Database):
@@ -471,14 +506,53 @@ def test_last_polled_is_max_called_at(db: Database):
     assert db.last_polled([TID])[TID] == T0 + HOUR
 
 
-def test_last_polled_ignores_error_and_skipped_rows(db: Database):
+def test_last_polled_counts_ok_and_error_rows_but_not_breaker_skips(db: Database):
     db.start_run(make_run())
     db.reserve_api_call(make_call(at=T0), limits())
     errored = db.reserve_api_call(make_call(at=T0 + 2 * HOUR), limits())
     db.complete_api_call(errored, ApiCallStatus.ERROR, 50, "boom")
     with pytest.raises(BudgetTripped):
         db.reserve_api_call(make_call(at=T0 + 3 * HOUR), limits(run=2))
+    assert db.last_polled([TID])[TID] == T0 + 2 * HOUR  # the error counts, the skip does not
+
+
+def test_last_polled_is_none_when_the_only_row_is_a_breaker_skip(db: Database):
+    db.start_run(make_run())
+    with pytest.raises(BudgetTripped):
+        db.reserve_api_call(make_call(), limits(run=0))
+    assert db.last_polled([TID]) == {TID: None}
+
+
+def test_last_polled_counts_a_target_that_only_ever_errored(db: Database):
+    db.start_run(make_run())
+    cid = db.reserve_api_call(make_call(), limits())
+    db.complete_api_call(cid, ApiCallStatus.ERROR, 5, "boom")
     assert db.last_polled([TID])[TID] == T0
+
+
+# -- runs_today_for_watchlist (times_per_day) ----------------------------------- #
+
+
+def test_runs_today_for_watchlist_counts_distinct_runs_with_paid_calls(db: Database):
+    for rid in ("r1", "r2"):
+        db.start_run(make_run(rid))
+    db.reserve_api_call(make_call("r1"), limits())
+    db.reserve_api_call(make_call("r1"), limits())  # same run twice: one run
+    errored = db.reserve_api_call(make_call("r2"), limits())
+    db.complete_api_call(errored, ApiCallStatus.ERROR, 5, "boom")
+    assert db.runs_today_for_watchlist(WL) == 2
+    assert db.runs_today_for_watchlist("other-watchlist") == 0
+
+
+def test_runs_today_for_watchlist_ignores_breaker_skips_and_yesterday(db: Database, clock: Clock):
+    db.start_run(make_run("r1"))
+    db.start_run(make_run("r2"))
+    db.reserve_api_call(make_call("r1", at=T0 - timedelta(days=1)), limits())  # yesterday
+    with pytest.raises(BudgetTripped):
+        db.reserve_api_call(make_call("r2"), limits(run=0))  # skipped_breaker today
+    assert db.runs_today_for_watchlist(WL) == 0
+    clock.t = T0 - timedelta(days=1)  # "today" is the other day: that call now counts
+    assert db.runs_today_for_watchlist(WL) == 1
 
 
 # --------------------------------------------------------------------------- #

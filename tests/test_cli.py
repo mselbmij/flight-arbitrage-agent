@@ -12,7 +12,7 @@ from typer.testing import CliRunner
 
 from src.db import Database
 from src.ingestion.mock_client import MockProvider
-from src.models import WatchlistFile
+from src.models import Provider, WatchlistFile
 from src.runner.cli import app
 from tests.conftest import REPO, make_alert, make_obs, make_run
 
@@ -110,6 +110,21 @@ def test_budget_on_shipped_example_config_reports_its_calls(monkeypatch: pytest.
     res = runner.invoke(app, ["budget", "--config", str(cfg)])
     assert f"calls/day: {wf.calls_per_day()}" in res.output
     assert res.exit_code == (1 if wf.calls_per_day() > 4 else 0)
+
+
+def test_budget_default_daily_limit_is_three_like_poll(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.delenv("MAX_DAILY_API_CALLS", raising=False)
+    res = runner.invoke(app, ["budget", "--config", str(write(tmp_path, BUDGET_YAML))])
+    assert res.exit_code == 1  # 6 calls/day against the default
+    assert "limit: 3" in res.output and "OVER" in res.output
+
+
+def test_budget_default_limit_comes_from_the_same_constant_as_poll():
+    from src.runner import cli
+
+    assert (cli.DEFAULT_MAX_CALLS_PER_RUN, cli.DEFAULT_MAX_DAILY_API_CALLS) == (2, 3)
 
 
 # --------------------------------------------------------------------------- #
@@ -703,3 +718,181 @@ def test_poll_exits_1_and_marks_the_run_errored_on_a_bug(
     [run] = rows(dbp, "SELECT * FROM runs")
     assert run["status"] == "error" and "boom" in run["error"]
     assert rows(dbp, "SELECT * FROM alerts") == []  # a bug is not a PROVIDER_ERROR
+
+
+# -- defaults, no providers, and the Amadeus test host on the live database --------------------
+
+THREE_TARGET_YAML = """
+version: 1
+watchlists:
+  - id: sea-sjc-thanksgiving
+    origin: SEA
+    destination: [SJC, SFO, OAK]
+    depart: 2026-11-25
+    return: 2026-11-29
+    ceiling_cents: 32000
+    poll: {providers: [serpapi], targets_per_run: 3}
+"""
+AMADEUS_YAML = POLL_YAML.replace("[serpapi]", "[amadeus]")
+
+
+@freeze_time(NOW)
+def test_poll_default_per_run_limit_is_two(
+    tmp_path: Path, poll_env: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.delenv("MAX_CALLS_PER_RUN")
+    monkeypatch.delenv("MAX_DAILY_API_CALLS")
+    args, dbp = poll_args(tmp_path, THREE_TARGET_YAML)
+    res = runner.invoke(app, args)
+    assert res.exit_code == 2, res.output
+    [run] = rows(dbp, "SELECT * FROM runs")
+    assert run["status"] == "budget_tripped" and run["calls_made"] == 2
+    [tripped] = rows(dbp, "SELECT message FROM alerts WHERE kind='budget_tripped'")
+    assert tripped["message"] == "API budget tripped (2/2 run)"
+
+
+@freeze_time(NOW)
+def test_poll_default_daily_limit_is_three(
+    tmp_path: Path, poll_env: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.delenv("MAX_CALLS_PER_RUN")
+    monkeypatch.delenv("MAX_DAILY_API_CALLS")
+    args, dbp = poll_args(tmp_path, THREE_TARGET_YAML)
+    assert runner.invoke(app, args).exit_code == 2  # run 1: two calls, then the run gate
+    res = runner.invoke(app, args)  # run 2: its first call is the day's third; the next trips
+    assert res.exit_code == 2, res.output
+    first, second = rows(dbp, "SELECT calls_made FROM runs ORDER BY started_at, rowid")
+    assert (first["calls_made"], second["calls_made"]) == (2, 1)
+    statuses = [r["status"] for r in rows(dbp, "SELECT status FROM api_calls ORDER BY id")]
+    assert statuses.count("skipped_breaker") == 2 and len(statuses) - 2 == 3
+
+
+def test_poll_without_any_provider_configured_exits_1_before_touching_the_db(
+    tmp_path: Path, poll_env: Path
+):
+    dbp = tmp_path / "scratch.db"
+    cfg = write(tmp_path, POLL_YAML)
+    res = runner.invoke(app, ["poll", "--db", str(dbp), "--config", str(cfg)])
+    assert res.exit_code == 1
+    assert "no providers configured" in res.output and "SERPAPI_KEY" in res.output
+    assert not dbp.exists()
+
+
+class _Spy:
+    """Records provider calls; every call fails like an outage so a run still finishes."""
+
+    calls = 0
+
+    @classmethod
+    def install(cls, monkeypatch: pytest.MonkeyPatch) -> type[_Spy]:
+        from src.ingestion.amadeus_client import AmadeusProvider
+        from src.ingestion.base import ProviderError
+
+        cls.calls = 0
+
+        def search(self, target, watchlist, run_id, observed_at):
+            cls.calls += 1
+            raise ProviderError(Provider.MOCK, "spy: no network")
+
+        monkeypatch.setattr(AmadeusProvider, "search", search)
+        return cls
+
+
+@pytest.fixture
+def amadeus_env(poll_env: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    monkeypatch.setenv("AMADEUS_CLIENT_ID", "id")
+    monkeypatch.setenv("AMADEUS_CLIENT_SECRET", "secret")
+    return poll_env
+
+
+def live_poll_args(tmp_path: Path, live: Path, *extra: str) -> list[str]:
+    return ["poll", "--db", str(live), "--config", str(write(tmp_path, AMADEUS_YAML)),
+            "--raw-dir", str(tmp_path / "raw"), *extra]  # fmt: skip
+
+
+@pytest.mark.parametrize("host", [None, "test", "sandbox"])
+def test_poll_refuses_the_live_db_with_amadeus_credentials_on_a_non_production_host(
+    tmp_path: Path, amadeus_env: Path, monkeypatch: pytest.MonkeyPatch, host: str | None
+):
+    if host is not None:
+        monkeypatch.setenv("AMADEUS_HOST", host)
+    spy = _Spy.install(monkeypatch)
+    res = runner.invoke(app, live_poll_args(tmp_path, amadeus_env))
+    assert res.exit_code == 1
+    assert "AMADEUS_HOST" in res.output and "--allow-live-db" in res.output
+    assert "live" in res.output
+    assert spy.calls == 0  # refused before any provider call
+    assert not amadeus_env.exists()  # and before anything was written
+
+
+def test_poll_refuses_the_implicit_live_db_too(
+    tmp_path: Path, amadeus_env: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setenv("AMADEUS_HOST", "test")
+    spy = _Spy.install(monkeypatch)
+    args = live_poll_args(tmp_path, amadeus_env)
+    i = args.index("--db")
+    del args[i : i + 2]  # falls back to $FARES_DB_PATH
+    assert runner.invoke(app, args).exit_code == 1
+    assert spy.calls == 0 and not amadeus_env.exists()
+
+
+@freeze_time(NOW)
+def test_poll_amadeus_test_host_on_the_live_db_proceeds_with_allow_live_db(
+    tmp_path: Path, amadeus_env: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setenv("AMADEUS_HOST", "test")
+    spy = _Spy.install(monkeypatch)
+    res = runner.invoke(app, live_poll_args(tmp_path, amadeus_env, "--allow-live-db"))
+    assert res.exit_code == 0, res.output
+    assert spy.calls == 1
+    assert len(rows(amadeus_env, "SELECT * FROM runs")) == 1
+
+
+@freeze_time(NOW)
+def test_poll_amadeus_production_host_on_the_live_db_needs_no_override(
+    tmp_path: Path, amadeus_env: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setenv("AMADEUS_HOST", "production")
+    spy = _Spy.install(monkeypatch)
+    res = runner.invoke(app, live_poll_args(tmp_path, amadeus_env))
+    assert res.exit_code == 0, res.output
+    assert spy.calls == 1
+
+
+@freeze_time(NOW)
+def test_poll_amadeus_test_host_on_a_scratch_db_needs_no_override(
+    tmp_path: Path, amadeus_env: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setenv("AMADEUS_HOST", "test")
+    spy = _Spy.install(monkeypatch)
+    scratch = tmp_path / "scratch.db"
+    res = runner.invoke(app, live_poll_args(tmp_path, scratch))
+    assert res.exit_code == 0, res.output
+    assert spy.calls == 1 and not amadeus_env.exists()
+
+
+@freeze_time(NOW)
+def test_poll_serpapi_only_on_the_live_db_is_not_blocked_by_the_amadeus_host_rule(
+    tmp_path: Path, poll_env: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """No Amadeus credentials: AMADEUS_HOST is irrelevant."""
+    from src.ingestion.base import ProviderError
+    from src.ingestion.serpapi_client import SerpApiProvider
+
+    monkeypatch.setenv("SERPAPI_KEY", "k")
+    monkeypatch.setenv("AMADEUS_HOST", "test")
+    seen = []
+
+    def search(self, target, watchlist, run_id, observed_at):
+        seen.append(target.target_id)
+        raise ProviderError(Provider.MOCK, "spy: no network")
+
+    monkeypatch.setattr(SerpApiProvider, "search", search)
+    res = runner.invoke(
+        app,
+        ["poll", "--db", str(poll_env), "--config", str(write(tmp_path, POLL_YAML)),
+         "--raw-dir", str(tmp_path / "raw")],
+    )  # fmt: skip
+    assert res.exit_code == 0, res.output
+    assert seen == [THANKS]

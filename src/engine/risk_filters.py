@@ -13,7 +13,9 @@ def risk_verdict(obs: FareObservation, wl: ResolvedWatchlist, *, config_hash: st
     c = wl.constraints
     slices = obs.itinerary.slices
     target = next((t for t in wl.targets if t.target_id == obs.target_id), None)
-    inbound_unverified = bool(target and target.is_round_trip and len(slices) == 1)
+    # fail closed: a target we cannot find is treated as a round trip
+    round_trip = True if target is None else target.is_round_trip
+    inbound_unverified = round_trip and len(slices) == 1
     rejections: list[str] = []
 
     if obs.fare_brand is FareBrand.BASIC_ECONOMY and not c.allow_basic_economy:

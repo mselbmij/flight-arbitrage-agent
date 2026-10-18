@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import hashlib
 from datetime import UTC, date, datetime, time, timedelta
+from decimal import Decimal
 from enum import StrEnum
 from typing import Annotated, Any, Literal, Self
 
@@ -160,6 +161,15 @@ class StrikeRule(BaseModel):
 
     reference: Literal["typical_low", "typical_high", "lowest_seen", "ceiling"]
     multiplier: float = Field(gt=0, le=2)
+
+    @field_validator("multiplier")
+    @classmethod
+    def _at_most_three_decimals(cls, v: float) -> float:
+        # the strike compare is exact Decimal(str(multiplier)); more precision than this
+        # is a typo, not a strategy
+        if Decimal(str(v)).as_tuple().exponent < -3:  # type: ignore[operator]
+            raise ValueError("multiplier may have at most 3 decimal places")
+        return v
 
 
 class StrikeConfig(BaseModel):

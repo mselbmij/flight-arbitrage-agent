@@ -32,6 +32,9 @@ DEFAULT_SEED_DB = "data/seed.db"
 DEFAULT_CONFIG = "config/watchlists.yaml"
 DEFAULT_DEMO_CONFIG = "config/watchlists.demo.yaml"
 DEFAULT_RAW_DIR = "data/raw"
+# Budget defaults (ARCHITECTURE.md section 6), shared by `fares poll` and `fares budget`.
+DEFAULT_MAX_CALLS_PER_RUN = 2
+DEFAULT_MAX_DAILY_API_CALLS = 3
 
 DbOpt = Annotated[Path | None, typer.Option("--db", help="SQLite path (default $FARES_DB_PATH).")]
 ConfigOpt = Annotated[
@@ -220,6 +223,10 @@ class Trigger(StrEnum):
     MANUAL = "manual"
 
 
+def _amadeus_configured() -> bool:
+    return bool(os.environ.get("AMADEUS_CLIENT_ID") and os.environ.get("AMADEUS_CLIENT_SECRET"))
+
+
 def _registry_from_env() -> ProviderRegistry:
     providers: dict[Provider, object] = {}
     if key := os.environ.get("SERPAPI_KEY"):
@@ -270,7 +277,9 @@ def poll(
     allow_live_db: Annotated[
         bool,
         typer.Option(
-            "--allow-live-db", help="With --provider-override, poll the live database anyway."
+            "--allow-live-db",
+            help="Poll the live database anyway: with --provider-override, or with Amadeus "
+            "credentials on a non-production AMADEUS_HOST.",
         ),
     ] = False,
 ) -> None:
@@ -278,7 +287,8 @@ def poll(
 
     Exit 0 ok, 2 budget tripped, 1 error. --provider-override mock still spends the breaker, so
     it refuses the live database ($FARES_DB_PATH) without --allow-live-db: mock rows there would
-    become a strike reference."""
+    become a strike reference. So does Amadeus with AMADEUS_HOST other than 'production': test
+    host prices are fake and would pollute the live history."""
     load_dotenv()
     if provider_override is not None and provider_override != "mock":
         raise typer.BadParameter("only 'mock' is supported", param_hint="--provider-override")
@@ -302,10 +312,31 @@ def poll(
         wf = _with_mock_only(wf)
         registry = ProviderRegistry({Provider.MOCK: MockProvider(fixtures)})
     else:
+        if (
+            db_path.resolve() == live.resolve()
+            and not allow_live_db
+            and _amadeus_configured()
+            and os.environ.get("AMADEUS_HOST") != "production"
+        ):
+            typer.echo(
+                f"refusing to poll {db_path}: it is the live database ($FARES_DB_PATH) and "
+                "Amadeus credentials are set but AMADEUS_HOST is not 'production'. Test-host "
+                "prices would pollute live history. Set AMADEUS_HOST=production, use a scratch "
+                "database (--db), or pass --allow-live-db.",
+                err=True,
+            )
+            raise typer.Exit(1)
         registry = _registry_from_env()
+        if registry.is_empty():
+            typer.echo(
+                "no providers configured (set SERPAPI_KEY and/or AMADEUS_CLIENT_ID + "
+                "AMADEUS_CLIENT_SECRET, or use --provider-override mock --fixtures DIR)",
+                err=True,
+            )
+            raise typer.Exit(1)
     limits = BudgetLimits(
-        max_per_run=int(os.environ.get("MAX_CALLS_PER_RUN", "2")),
-        max_per_day=int(os.environ.get("MAX_DAILY_API_CALLS", "3")),
+        max_per_run=int(os.environ.get("MAX_CALLS_PER_RUN", DEFAULT_MAX_CALLS_PER_RUN)),
+        max_per_day=int(os.environ.get("MAX_DAILY_API_CALLS", DEFAULT_MAX_DAILY_API_CALLS)),
     )
 
     db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -385,7 +416,7 @@ def _print_poll_summary(d: Database, run_id: str) -> None:
 def budget(config: ConfigOpt = Path(DEFAULT_CONFIG)) -> None:
     """Compare the config's calls/day with MAX_DAILY_API_CALLS; exit 1 if over."""
     load_dotenv()
-    limit = int(os.environ.get("MAX_DAILY_API_CALLS", "4"))
+    limit = int(os.environ.get("MAX_DAILY_API_CALLS", DEFAULT_MAX_DAILY_API_CALLS))
     calls = _load(config).calls_per_day()
     over = calls > limit
     typer.echo(f"calls/day: {calls}  limit: {limit}  ({'OVER' if over else 'ok'})")

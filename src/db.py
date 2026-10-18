@@ -494,12 +494,21 @@ class Database:
         marks = ",".join("?" * len(target_ids))
         rows = self.con.execute(
             f"SELECT target_id, MAX(called_at) FROM api_calls "
-            f"WHERE status = ? AND target_id IN ({marks}) GROUP BY target_id",
-            [ApiCallStatus.OK.value, *target_ids],
+            f"WHERE status != ? AND target_id IN ({marks}) GROUP BY target_id",
+            [ApiCallStatus.SKIPPED_BREAKER.value, *target_ids],
         )
         for tid, called_at in rows:
             out[tid] = _dt(called_at)
         return out
+
+    def runs_today_for_watchlist(self, watchlist_id: str) -> int:
+        """Distinct runs since 00:00 UTC (by this database's clock) that paid for a call
+        (`ok` or `error`) for `watchlist_id`. Breaker-skipped rows are not polls."""
+        return self.con.execute(
+            "SELECT COUNT(DISTINCT run_id) FROM api_calls "
+            "WHERE watchlist_id = ? AND called_at >= ? AND status != ?",
+            (watchlist_id, _ts(self._day_start()), ApiCallStatus.SKIPPED_BREAKER.value),
+        ).fetchone()[0]
 
     # -- alerts ---------------------------------------------------------------- #
 

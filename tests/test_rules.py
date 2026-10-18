@@ -7,7 +7,9 @@ from the UTC date, ARCHITECTURE section 7 "Clocks").
 
 from __future__ import annotations
 
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta, timezone, tzinfo
+from decimal import ROUND_FLOOR, Decimal
+from zoneinfo import ZoneInfo
 
 import pytest
 from pydantic import ValidationError
@@ -23,6 +25,7 @@ from src.models import (
     ResolvedWatchlist,
     RiskVerdict,
     SearchTarget,
+    StrikeRule,
     WatchlistFile,
 )
 from tests.conftest import make_band, make_itinerary, make_obs
@@ -107,6 +110,7 @@ def mk(
     raw_brand: str | None = "Main",
     observed_at: datetime = NOW,
     risk: RiskVerdict | None = None,
+    changeable: bool | None = None,
 ) -> FareObservation:
     return make_obs(
         "run-1",
@@ -119,6 +123,7 @@ def mk(
         fare_brand=brand,
         fare_brand_raw=raw_brand,
         observed_at=observed_at,
+        changeable=changeable,
         days_to_departure=t.days_to_departure(observed_at),
         risk=risk or verdict(),
     )
@@ -339,14 +344,34 @@ def test_multiplier_0_9_on_30001_qualifies_at_27000_and_not_at_27001():
     assert ev(wl, t, [mk(t, 27001)], st) == []
 
 
-@pytest.mark.parametrize("mult", [0.29, 0.58, 1.13, 1.15, 0.95, 1.05, 1.1, 1.2])
+@pytest.mark.parametrize("mult", [0.29, 0.58, 0.875, 1.13, 1.15, 0.95, 1.05, 1.1, 1.2])
 @pytest.mark.parametrize("ref", [31000, 30001, 12345])
 def test_exact_boundary_for_float_unfriendly_multipliers(ref: int, mult: float):
-    limit = ref * round(mult * 100) // 100  # integer floor of ref * mult
+    # expected boundary from exact decimal arithmetic, independent of the implementation
+    limit = int((Decimal(ref) * Decimal(str(mult))).to_integral_value(ROUND_FLOOR))
     wl, t = make_wl(depart_in(40), ceiling=1, strike=strike_all("typical_low", mult))
     st = state(band_for(t, low=ref, high=ref + 1000))
     assert priced(ev(wl, t, [mk(t, limit)], st)) != []
     assert ev(wl, t, [mk(t, limit + 1)], st) == []
+
+
+def test_three_decimal_multiplier_0_875_on_31000_qualifies_at_27125_and_not_at_27126():
+    # 31000 * 0.875 = 27125 exactly; round(mult * 100) would have turned 0.875 into 0.88
+    wl, t = make_wl(depart_in(40), ceiling=1, strike=strike_all("typical_low", 0.875))
+    st = state(band_for(t, low=31000, high=40000))
+    assert only(ev(wl, t, [mk(t, 27125)], st), AlertKind.BUY).price_cents == 27125
+    assert ev(wl, t, [mk(t, 27126)], st) == []
+
+
+@pytest.mark.parametrize("mult", [0.1, 0.5, 0.875, 1.15, 1.999, 2.0, 1])
+def test_strike_rule_accepts_up_to_three_decimals(mult: float):
+    assert StrikeRule(reference="typical_low", multiplier=mult).multiplier == mult
+
+
+@pytest.mark.parametrize("mult", [0.8751, 1.0001, 0.12345, 1.15001])
+def test_strike_rule_rejects_more_than_three_decimals(mult: float):
+    with pytest.raises(ValidationError, match="3 decimal"):
+        StrikeRule(reference="typical_low", multiplier=mult)
 
 
 def test_lowest_seen_reference_strikes_at_or_below_history():
@@ -501,21 +526,78 @@ def test_unverified_brand_without_raw_is_skipped_in_favour_of_a_dearer_verified_
     assert not alert.message.startswith("[")
 
 
-def test_unverified_brand_with_raw_is_still_the_cheapest_candidate():
-    wl, t = make_wl(depart_in(40), ceiling=10000)
-    cheap = mk(
+def unverified(t, price, *, oid=1, flight="555", raw="Light"):
+    return mk(
         t,
-        25000,
-        oid=1,
-        flight="555",
+        price,
+        oid=oid,
+        flight=flight,
         brand=FareBrand.UNKNOWN,
-        raw_brand="Light",
+        raw_brand=raw,
         risk=verdict(brand_unverified=True),
     )
+
+
+def test_a_verified_fare_beats_a_cheaper_unverified_one_that_also_qualifies():
+    wl, t = make_wl(depart_in(40), ceiling=10000)
     solid = mk(t, 29000, oid=2, flight="102")
-    [alert] = priced(ev(wl, t, [cheap, solid], state(band_for(t, low=30000))))
-    assert alert.observation_id == 1
+    [alert] = priced(ev(wl, t, [unverified(t, 25000), solid], state(band_for(t, low=30000))))
+    assert alert.observation_id == 2
+    assert alert.price_cents == 29000
+    assert not alert.message.startswith("[")
+
+
+def test_the_cheaper_unverified_fare_is_named_in_an_also_seen_body_line():
+    wl, t = make_wl(depart_in(40), ceiling=10000)
+    solid = mk(t, 29000, oid=2, flight="102")
+    weird = unverified(t, 19000, raw="Weird")
+    [alert] = priced(ev(wl, t, [solid, weird], state(band_for(t, low=30000))))
+    lines = alert.message.split("\n")
+    assert alert.observation_id == 2
+    assert len(lines) == 4
+    assert lines[3] == 'also seen: $190 "Weird" (brand unverified)'
+
+
+def test_also_seen_names_the_cheapest_of_several_cheaper_unverified_fares():
+    wl, t = make_wl(depart_in(40), ceiling=10000)
+    solid = mk(t, 29000, oid=2, flight="102")
+    obs = [unverified(t, 21000, oid=3, flight="556", raw="Mid"), solid]
+    obs.append(unverified(t, 19000, oid=4, flight="557", raw="Weird"))
+    [alert] = priced(ev(wl, t, obs, state(band_for(t, low=30000))))
+    assert alert.message.split("\n")[3] == 'also seen: $190 "Weird" (brand unverified)'
+
+
+def test_no_also_seen_line_when_the_unverified_fare_is_dearer_than_the_verified_one():
+    wl, t = make_wl(depart_in(40), ceiling=10000)
+    solid = mk(t, 27000, oid=2, flight="102")
+    [alert] = priced(ev(wl, t, [solid, unverified(t, 29000)], state(band_for(t, low=30000))))
+    assert alert.observation_id == 2
+    assert "also seen" not in alert.message
+    assert len(alert.message.split("\n")) == 3
+
+
+def test_no_also_seen_line_when_the_cheaper_unverified_fare_does_not_qualify():
+    wl, t = make_wl(depart_in(40), ceiling=10000)
+    solid = mk(t, 29000, oid=2, flight="102")
+    ghost = mk(
+        t, 100, oid=3, flight="556", brand=FareBrand.UNKNOWN, raw_brand=None,
+        risk=verdict(brand_unverified=True),
+    )  # fmt: skip
+    [alert] = priced(ev(wl, t, [solid, ghost], state(band_for(t, low=30000))))
+    assert "also seen" not in alert.message
+
+
+def test_with_no_verified_candidate_the_cheapest_unverified_with_raw_wins_with_the_prefix():
+    wl, t = make_wl(depart_in(40), ceiling=10000)
+    obs = [
+        unverified(t, 27000, oid=1, flight="555", raw="Light"),
+        unverified(t, 25000, oid=2, flight="556", raw="Lighter"),
+        mk(t, 99000, oid=3, flight="102"),  # verified but nowhere near the strike
+    ]
+    [alert] = priced(ev(wl, t, obs, state(band_for(t, low=30000))))
+    assert alert.observation_id == 2
     assert alert.message.startswith("[brand unverified] BUY ")
+    assert "also seen" not in alert.message
 
 
 def test_inbound_unverified_gets_the_return_not_checked_prefix():
@@ -652,6 +734,50 @@ def test_credit_drop_ignores_a_risk_rejected_row_of_the_purchased_itinerary():
     assert ev(wl, t, [trap], state()) == []
 
 
+def test_credit_drop_ignores_an_unverified_brand_row_with_no_raw_label():
+    wl, t = purchased()
+    ghost = mk(
+        t, 30000, brand=FareBrand.UNKNOWN, raw_brand=None, risk=verdict(brand_unverified=True)
+    )
+    assert ev(wl, t, [ghost], state()) == []
+
+
+def test_credit_drop_accepts_an_unverified_brand_row_that_has_a_raw_label_with_the_prefix():
+    wl, t = purchased()
+    fare = mk(
+        t, 30000, brand=FareBrand.UNKNOWN, raw_brand="Saver?", risk=verdict(brand_unverified=True)
+    )
+    alert = only(ev(wl, t, [fare], state()), AlertKind.CREDIT_DROP)
+    assert alert.message.startswith("[brand unverified] Re-fare ")
+
+
+def test_credit_drop_ignores_a_basic_economy_row_of_the_purchased_itinerary():
+    wl, t = purchased()
+    basic = mk(t, 30000, brand=FareBrand.BASIC_ECONOMY, raw_brand="Basic")
+    assert ev(wl, t, [basic], state()) == []
+
+
+def test_credit_drop_ignores_a_row_that_is_not_changeable():
+    wl, t = purchased()  # the purchase itself IS changeable; the cheaper re-fare is not
+    assert ev(wl, t, [mk(t, 30000, changeable=False)], state()) == []
+
+
+def test_credit_drop_accepts_a_row_whose_changeability_is_unknown_or_true():
+    wl, t = purchased()
+    assert only(ev(wl, t, [mk(t, 30000, changeable=None)], state()), AlertKind.CREDIT_DROP)
+    assert only(ev(wl, t, [mk(t, 30000, changeable=True)], state()), AlertKind.CREDIT_DROP)
+
+
+def test_credit_drop_skips_excluded_rows_in_favour_of_a_dearer_eligible_one():
+    wl, t = purchased()
+    obs = [
+        mk(t, 20000, oid=1, brand=FareBrand.BASIC_ECONOMY, raw_brand="Basic"),
+        mk(t, 21000, oid=2, changeable=False),
+        mk(t, 38000, oid=3),
+    ]
+    assert only(ev(wl, t, obs, state()), AlertKind.CREDIT_DROP).observation_id == 3
+
+
 def test_credit_drop_compares_the_cheapest_row_of_the_purchased_itinerary_across_providers():
     wl, t = purchased()
     obs = [
@@ -754,6 +880,73 @@ def test_credit_drop_still_fires_after_dot_has_been_alerted():
     wl, t = purchased(ago=timedelta(hours=2))
     alerts = ev(wl, t, [mk(t, 30000)], state(alerted=[AlertKind.DOT_24H]))
     assert [a.kind for a in alerts] == [AlertKind.CREDIT_DROP]
+
+
+PT = ZoneInfo("America/Los_Angeles")
+
+
+def test_dot_seven_day_rule_counts_days_in_the_purchasers_own_zone():
+    # bought 20:00 PDT on 10-10 (= 03:00 UTC on 10-11) for a 10-17 departure: 7 days in
+    # Seattle, 6 by the UTC date, and the DOT rule is about the purchaser's calendar
+    bought = datetime(2026, 10, 10, 20, 0, tzinfo=PT)
+    wl, t = make_wl(date(2026, 10, 17), purchase={"purchased_at": bought})
+    now = bought + timedelta(hours=1)
+    assert only(ev(wl, t, [], state(), now=now), AlertKind.DOT_24H)
+
+
+def test_dot_seven_day_rule_still_rejects_six_days_in_the_purchasers_own_zone():
+    bought = datetime(2026, 10, 10, 20, 0, tzinfo=PT)
+    wl, t = make_wl(date(2026, 10, 16), purchase={"purchased_at": bought})
+    assert ev(wl, t, [], state(), now=bought + timedelta(hours=1)) == []
+
+
+def test_dot_title_renders_the_close_time_in_the_purchase_zone_with_its_label():
+    bought = datetime(2026, 10, 10, 20, 0, tzinfo=PT)
+    wl, t = make_wl(date(2026, 10, 24), purchase={"purchased_at": bought})
+    [alert] = ev(wl, t, [], state(), now=bought + timedelta(hours=1))
+    assert title(alert) == "DOT 24h window on SEA→SJC closes 20:00 tomorrow (PDT)"
+    assert "Oct 11 20:00 PDT" in alert.message
+
+
+def test_dot_title_for_a_utc_purchase_is_labelled_utc():
+    wl, t = purchased(ago=timedelta(hours=2))
+    assert title(only(ev(wl, t, [], state()), AlertKind.DOT_24H)).endswith("(UTC)")
+
+
+def test_dot_close_time_is_absolute_across_a_dst_change():
+    # clocks fall back at 02:00 on 2026-11-01: 24 real hours after 00:30 PDT is 23:30 PST
+    bought = datetime(2026, 11, 1, 0, 30, tzinfo=PT)
+    wl, t = make_wl(date(2026, 11, 20), purchase={"purchased_at": bought})
+    [alert] = ev(wl, t, [], state(), now=bought + timedelta(hours=1))
+    assert title(alert) == "DOT 24h window on SEA→SJC closes 23:30 today (PST)"
+
+
+class _NamelessZone(tzinfo):
+    """UTC+05:30 with no abbreviation: strftime('%Z') is ''."""
+
+    def utcoffset(self, dt):
+        return timedelta(hours=5, minutes=30)
+
+    def dst(self, dt):
+        return timedelta(0)
+
+    def tzname(self, dt):
+        return None
+
+
+def test_dot_title_falls_back_to_the_numeric_offset_when_the_zone_has_no_name():
+    bought = datetime(2026, 10, 10, 20, 0, tzinfo=_NamelessZone())
+    assert bought.strftime("%Z") == ""
+    wl, t = make_wl(date(2026, 10, 24), purchase={"purchased_at": bought})
+    [alert] = ev(wl, t, [], state(), now=bought + timedelta(hours=1))
+    assert title(alert).endswith("closes 20:00 tomorrow (+05:30)")
+
+
+def test_dot_title_for_a_fixed_offset_zone_uses_its_name():
+    bought = datetime(2026, 10, 10, 20, 0, tzinfo=timezone(timedelta(hours=-7)))
+    wl, t = make_wl(date(2026, 10, 24), purchase={"purchased_at": bought})
+    [alert] = ev(wl, t, [], state(), now=bought + timedelta(hours=1))
+    assert title(alert).startswith("DOT 24h window on SEA→SJC closes 20:00 tomorrow (")
 
 
 # --------------------------------------------------------------------------- #
@@ -892,6 +1085,17 @@ def test_buy_body_for_a_one_stop_itinerary_says_via_the_connection():
     fare = mk(t, 28700, stops=1, observed_at=SEEN)
     [alert] = ev(wl, t, [fare], state(band_for(t, low=31000)), now=SEEN)
     assert "1 stop via SLC" in alert.message
+
+
+def test_seen_time_is_converted_to_utc_before_it_is_labelled_utc():
+    wl, t = thanksgiving_wl()
+    seen_pt = SEEN.astimezone(PT)  # 23:52 on 10-21 local; the same instant as 06:52 UTC
+    assert seen_pt.hour == 23
+    # the model insists on UTC, so bypass validation to hand the formatter a non-UTC stamp
+    fare = mk(t, 28700, observed_at=SEEN).model_copy(update={"observed_at": seen_pt})
+    [alert] = ev(wl, t, [fare], state(band_for(t, low=31000)), now=SEEN)
+    assert "serpapi 06:52 UTC" in alert.message
+    assert "23:52" not in alert.message
 
 
 def test_buy_with_cents_in_the_price_shows_them_in_the_title():

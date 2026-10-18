@@ -64,6 +64,9 @@ class ProviderRegistry:
     def __init__(self, providers: Mapping[Provider, FlightProvider]) -> None:
         self._providers = dict(providers)
 
+    def is_empty(self) -> bool:
+        return not self._providers
+
     def get(self, name: Provider) -> FlightProvider | None:
         return self._providers.get(name)
 
@@ -150,8 +153,20 @@ class _Poller:
         self.raw_dir, self.now, self.run_id, self.config_hash = raw_dir, now, run_id, config_hash
 
     def run(self, wf: WatchlistFile) -> Literal["ok", "budget_tripped"]:
-        for wl in wf.resolved():
+        # purchased watchlists first: post-purchase tracking (credit drops, the DOT window) is
+        # time-limited and must not be starved by a per-run limit spent on watching grids
+        resolved = sorted(wf.resolved(), key=lambda w: w.status is not WatchStatus.PURCHASED)
+        for wl in resolved:
             if wl.status not in (WatchStatus.WATCHING, WatchStatus.PURCHASED):
+                continue
+            done = self.db.runs_today_for_watchlist(wl.id)
+            if done >= wl.poll.times_per_day:
+                log.info(
+                    "%s: already polled in %d run(s) today (times_per_day=%d), skipping",
+                    wl.id,
+                    done,
+                    wl.poll.times_per_day,
+                )
                 continue
             last = self.db.last_polled([t.target_id for t in wl.targets])
             for target in select_targets(wl, last, now=self.now()):
@@ -193,6 +208,10 @@ class _Poller:
             try:
                 call_id = db.reserve_api_call(call, self.limits)
             except BudgetTripped as e:
+                # rows already paid for in this target must still be judged: a BUY must not
+                # be lost because the NEXT provider call tripped the breaker
+                if collected and first_call_at is not None:
+                    self._evaluate(wl, target, collected, band, lowest_before, first_call_at)
                 self._budget_tripped(wl, target, e)
                 return False
 
@@ -298,7 +317,7 @@ class _Poller:
                 kind=AlertKind.PROVIDER_ERROR,
                 regime=wl.regime_for(target, now),
                 message=f"{provider.value} failed for {wl.id}\n{target.target_id}: {detail}",
-                alert_key=f"{wl.id}:provider_error:{target.target_id}:0",
+                alert_key=f"{wl.id}:provider_error:{target.target_id}:{provider.value}",
             )
         )
 

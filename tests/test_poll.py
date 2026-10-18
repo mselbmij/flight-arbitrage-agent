@@ -701,7 +701,7 @@ def test_poll_provider_error_is_logged_alerted_and_the_run_carries_on(h: Harness
 
     [err] = h.alerts(AlertKind.PROVIDER_ERROR)
     assert err["watchlist_id"] == "rt-one"
-    assert err["alert_key"].startswith("rt-one:provider_error:")
+    assert err["alert_key"] == f"rt-one:provider_error:{RT_TID}:mock"
     assert "mock" in err["message"]
     assert RT_TID in err["message"]
     assert "no fixture" in err["message"]
@@ -848,8 +848,9 @@ def test_poll_each_provider_of_a_watchlist_is_its_own_call_and_raw_file(h: Harne
     stem = RT_TID.replace(":", "_")
     assert (h.raw / run.run_id / f"mock-{stem}.json").is_file()
     assert (h.raw / run.run_id / f"serpapi-{stem}.json").is_file()
-    assert h.alerts(AlertKind.BUY)  # at least one BUY; see NEEDS ARCHITECT on one-vs-two alerts
-    assert min(a["price_cents"] for a in h.alerts(AlertKind.BUY)) == MID - 1000
+    [buy] = h.alerts(AlertKind.BUY)  # one evaluation over both providers' rows: one alert
+    assert buy["price_cents"] == MID - 1000
+    assert h.db.observation(buy["observation_id"]).provider is Provider.SERPAPI  # type: ignore[union-attr]
 
 
 def test_poll_run_gate_counts_every_provider_call_not_every_target(h: Harness):
@@ -889,6 +890,224 @@ def test_poll_second_run_picks_the_unpolled_target_and_the_oldest(h: Harness):
     assert len(second_ids) == 2
     assert all_ids - first_ids <= second_ids  # the never-polled target goes first
     assert None not in h.db.last_polled(sorted(all_ids)).values()
+
+
+# --------------------------------------------------------------------------- #
+# review fixes: breaker trip between providers, failing targets, times_per_day, ordering
+# --------------------------------------------------------------------------- #
+
+
+def two_provider_registry(h: Harness, shift: int = 0) -> ProviderRegistry:
+    return ProviderRegistry(
+        {
+            Provider.MOCK: MockProvider(h.fx),
+            Provider.SERPAPI: RelabelProvider(MockProvider(h.fx), Provider.SERPAPI, shift),
+        }
+    )
+
+
+def test_poll_breaker_trip_between_providers_still_evaluates_the_rows_already_paid_for(
+    h: Harness,
+):
+    wf = wf_of(wl_dict(RT, poll={"providers": ["mock", "serpapi"]}))
+    h.fixtures(wf)
+    run = h.poll(
+        wf,
+        providers=two_provider_registry(h),
+        limits=BudgetLimits(max_per_run=1, max_per_day=100),
+    )
+    assert run.status == "budget_tripped"
+    assert [r["status"] for r in h.q("SELECT status FROM api_calls ORDER BY id")] == [
+        "ok",
+        "skipped_breaker",
+    ]
+    assert {r["provider"] for r in h.q("SELECT provider FROM observations")} == {"mock"}
+    [buy] = h.alerts(AlertKind.BUY)  # the first provider's BUY must not be discarded
+    assert (buy["price_cents"], buy["target_id"]) == (MID, RT_TID)
+    [tripped] = h.alerts(AlertKind.BUDGET_TRIPPED)
+    assert tripped["id"] > buy["id"]  # judged first, then the trip is reported
+    assert [a.kind for a in h.notifier.alerts] == [AlertKind.BUY, AlertKind.BUDGET_TRIPPED]
+
+
+def test_poll_breaker_trip_on_the_first_provider_evaluates_nothing(h: Harness):
+    wf = wf_of(wl_dict(RT, poll={"providers": ["mock", "serpapi"]}))
+    h.fixtures(wf)
+    run = h.poll(
+        wf,
+        providers=two_provider_registry(h),
+        limits=BudgetLimits(max_per_run=0, max_per_day=100),
+    )
+    assert run.status == "budget_tripped"
+    assert [a["kind"] for a in h.alerts()] == ["budget_tripped"]
+
+
+def test_poll_a_target_that_keeps_failing_does_not_pin_the_round_robin(h: Harness):
+    """ERROR rows count as polled, so the broken target goes to the back of the line."""
+    wf = wf_of(wl_dict(GRID, poll={"targets_per_run": 1}))
+    wl = wf.resolved()[0]
+    broken = wl.targets[0].target_id
+    h.fixtures(wf, skip=frozenset({broken}))
+    seen: list[str] = []
+    for day in range(3):
+        h.clock.t = BASE + timedelta(days=day)
+        run = h.poll(wf)
+        assert run.status == "ok" and run.calls_made == 1
+        [call] = h.q("SELECT target_id, status FROM api_calls WHERE run_id=?", run.run_id)
+        seen.append(call["target_id"])
+    assert seen[0] == broken  # never polled, earliest in the grid: goes first and fails
+    assert sorted(seen) == sorted(t.target_id for t in wl.targets)  # then the other two, in turn
+    assert None not in h.db.last_polled(seen).values()
+
+
+def test_poll_provider_error_alerts_are_keyed_by_provider(h: Harness):
+    wf = wf_of(wl_dict(RT, poll={"providers": ["mock", "serpapi"]}))
+    h.fixtures(wf, skip=frozenset({RT_TID}))
+    h.poll(wf, providers=two_provider_registry(h))
+    keys = sorted(a["alert_key"] for a in h.alerts(AlertKind.PROVIDER_ERROR))
+    assert keys == [
+        f"rt-one:provider_error:{RT_TID}:mock",
+        f"rt-one:provider_error:{RT_TID}:serpapi",
+    ]  # one outage per provider, not one swallowed by dedup
+
+
+# -- times_per_day ----------------------------------------------------------------------------
+
+
+def test_poll_times_per_day_caps_the_runs_that_may_poll_a_watchlist_per_utc_day(h: Harness):
+    wf = wf_of(wl_dict(RT, poll={"times_per_day": 1}))
+    h.fixtures(wf)
+    first = h.poll(wf)
+    assert first.calls_made == 1
+
+    h.clock.t = BASE + timedelta(hours=3)  # same UTC day
+    second = h.poll(wf)
+    assert second.status == "ok"
+    assert second.calls_made == 0
+    assert h.q("SELECT COUNT(*) AS n FROM api_calls")[0]["n"] == 1
+
+    h.clock.t = BASE + timedelta(days=1)  # 2030-03-02 12:00 UTC
+    third = h.poll(wf)
+    assert third.calls_made == 1
+
+
+def test_poll_times_per_day_allows_exactly_that_many_runs(h: Harness):
+    wf = wf_of(wl_dict(RT, poll={"times_per_day": 2}))
+    h.fixtures(wf)
+    calls = []
+    for hours in (0, 1, 2):
+        h.clock.t = BASE + timedelta(hours=hours)
+        calls.append(h.poll(wf).calls_made)
+    assert calls == [1, 1, 0]
+
+
+def test_poll_times_per_day_is_per_watchlist_and_logs_the_skip(
+    h: Harness, caplog: pytest.LogCaptureFixture
+):
+    wf = wf_of(wl_dict(RT, poll={"times_per_day": 1}), wl_dict(GRID, poll={"targets_per_run": 1}))
+    h.fixtures(wf)
+    h.poll(wf)
+    h.clock.t = BASE + timedelta(hours=1)
+    with caplog.at_level(logging.INFO):
+        run = h.poll(wf)
+    assert run.calls_made == 1  # grid-three (times_per_day=2) still polls, rt-one does not
+    assert [
+        r["watchlist_id"]
+        for r in h.q("SELECT watchlist_id FROM api_calls WHERE run_id=?", run.run_id)
+    ] == ["grid-three"]
+    skips = [r for r in caplog.records if r.levelno == logging.INFO and "rt-one" in r.getMessage()]
+    assert skips and "times_per_day" in skips[0].getMessage()
+
+
+def test_poll_times_per_day_applies_to_a_purchased_watchlist_too(h: Harness):
+    wf = wf_of(wl_dict(PAID, poll={"times_per_day": 1}))
+    h.fixtures(wf)
+    assert h.poll(wf).calls_made == 1
+    h.clock.t = BASE + timedelta(hours=2)
+    assert h.poll(wf).calls_made == 0
+
+
+def test_poll_breaker_skips_do_not_count_against_times_per_day(h: Harness):
+    wf = wf_of(wl_dict(RT, poll={"times_per_day": 1}))
+    h.fixtures(wf)
+    tripped = h.poll(wf, limits=BudgetLimits(max_per_run=0, max_per_day=100))
+    assert tripped.status == "budget_tripped" and tripped.calls_made == 0
+    h.clock.t = BASE + timedelta(hours=1)
+    assert h.poll(wf).calls_made == 1  # the skipped run never polled anything
+
+
+# -- purchased watchlists are polled first --------------------------------------------------
+
+
+def test_poll_purchased_watchlist_goes_before_watching_ones_when_the_run_limit_bites(h: Harness):
+    wf = wf_of(RT, PAID)  # RT is listed first, PAID second
+    h.fixtures(wf)
+    run = h.poll(wf, limits=BudgetLimits(max_per_run=1, max_per_day=100))
+    assert run.status == "budget_tripped"
+    ledger = h.q("SELECT status, watchlist_id FROM api_calls ORDER BY id")
+    assert [(r["status"], r["watchlist_id"]) for r in ledger] == [
+        ("ok", "paid-grid"),
+        ("skipped_breaker", "rt-one"),
+    ]
+    assert Counter(a["kind"] for a in h.alerts()) == {
+        "credit_drop": 1,
+        "dot_24h": 1,
+        "budget_tripped": 1,
+    }
+
+
+# -- [return not checked] end to end ----------------------------------------------------------
+
+
+def write_outbound_only_fixture(fx: Path, t: SearchTarget, price: int = MID) -> None:
+    full = fare(t, "1553", 1, price, FareBrand.MAIN_CABIN)
+    outbound_only = full.model_copy(
+        update={"itinerary": Itinerary(slices=full.itinerary.slices[:1])}
+    )
+    payload = {"observations": [dump(outbound_only)], "band": None, "raw": {"source": "test"}}
+    (fx / (t.target_id.replace(":", "_") + ".json")).write_text(json.dumps(payload))
+
+
+def test_poll_outbound_only_round_trip_fixture_buys_with_the_return_not_checked_prefix(
+    h: Harness,
+):
+    wf = wf_of(RT)
+    [target] = wf.resolved()[0].targets
+    assert target.is_round_trip
+    write_outbound_only_fixture(h.fx, target)
+    h.poll(wf)
+    [buy] = h.alerts(AlertKind.BUY)
+    assert buy["message"].startswith("[return not checked] BUY ")
+    [row] = h.q("SELECT risk_passed, risk_inbound_unverified FROM observations")
+    assert (row["risk_passed"], row["risk_inbound_unverified"]) == (1, 1)
+
+
+def test_poll_one_way_target_with_one_slice_buys_without_a_prefix(h: Harness):
+    one_way = {k: v for k, v in RT.items() if k != "return"} | {"id": "one-way"}
+    wf = wf_of(one_way)
+    [target] = wf.resolved()[0].targets
+    assert not target.is_round_trip
+    outbound = fare(
+        target.model_copy(update={"return_": date(2030, 4, 13)}),
+        "1553",
+        1,
+        MID,
+        FareBrand.MAIN_CABIN,
+    )
+    outbound = outbound.model_copy(
+        update={
+            "target_id": target.target_id,
+            "watchlist_id": target.watchlist_id,
+            "itinerary": Itinerary(slices=outbound.itinerary.slices[:1]),
+        }
+    )
+    payload = {"observations": [dump(outbound)], "band": None, "raw": {"source": "test"}}
+    (h.fx / (target.target_id.replace(":", "_") + ".json")).write_text(json.dumps(payload))
+    h.poll(wf)
+    [buy] = h.alerts(AlertKind.BUY)
+    assert buy["message"].startswith("BUY ")
+    assert "[" not in buy["message"].split("\n", 1)[0]
+    [row] = h.q("SELECT risk_inbound_unverified FROM observations")
+    assert row["risk_inbound_unverified"] == 0
 
 
 # --------------------------------------------------------------------------- #

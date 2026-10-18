@@ -2,13 +2,14 @@
 
 Pure functions: no DB, no clock reads, no logging. The runner reads `TargetState` from the
 database, passes THIS run's risk-verdicted observations and an explicit `now`, and persists
-whatever comes back. Money is integer cents end to end; the strike compare is exact integer
-arithmetic (`price * 100 <= ref * round(mult * 100)`), never `int(float)`.
+whatever comes back. Money is integer cents end to end; the strike compare is exact `Decimal`
+arithmetic on the multiplier's decimal text (`Decimal(str(mult))`), never `int(float)`.
 """
 
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 
 from pydantic import BaseModel, ConfigDict
 
@@ -16,6 +17,7 @@ from src.models import (
     Alert,
     AlertKind,
     BenchmarkBand,
+    FareBrand,
     FareObservation,
     Regime,
     ResolvedWatchlist,
@@ -84,7 +86,18 @@ def _fmt_brand(obs: FareObservation) -> str:
 
 
 def _fmt_seen(obs: FareObservation) -> str:
-    return f"{obs.provider.value} {obs.observed_at:%H:%M} UTC"
+    return f"{obs.provider.value} {obs.observed_at.astimezone(UTC):%H:%M} UTC"
+
+
+def _fmt_offset(dt: datetime) -> str:
+    off = dt.utcoffset() or timedelta(0)
+    minutes = int(off.total_seconds() // 60)
+    sign = "-" if minutes < 0 else "+"
+    return f"{sign}{abs(minutes) // 60:02d}:{abs(minutes) % 60:02d}"
+
+
+def _brand_unverified(obs: FareObservation) -> bool:
+    return obs.risk is not None and obs.risk.brand_unverified
 
 
 def _prefixes(obs: FareObservation) -> str:
@@ -138,8 +151,9 @@ def strike_reference(
 
 
 def _within(price_cents: int, ref: int | None, mult: float) -> bool:
-    """price <= ref * mult in exact integer arithmetic (multiplier has at most 2 decimals)."""
-    return ref is not None and price_cents * 100 <= ref * round(mult * 100)
+    """price <= ref * mult, exactly. The multiplier is read from its shortest decimal repr
+    (StrikeRule allows at most 3 decimal places), so 1.15 means 1.15 and not its float neighbour."""
+    return ref is not None and Decimal(price_cents) <= Decimal(ref) * Decimal(str(mult))
 
 
 # --------------------------------------------------------------------------- #
@@ -210,9 +224,14 @@ def _strike(
         and not (o.risk.brand_unverified and o.fare_brand_raw is None)
         and (o.price_cents <= wl.ceiling_cents or _within(o.price_cents, ref, mult))
     ]
-    best = _cheapest(candidates)
+    # a verified fare beats a cheaper unverified one: the cheapest unverified is only the
+    # winner when nothing verified qualified, and is otherwise mentioned in the body
+    verified = [o for o in candidates if not _brand_unverified(o)]
+    unverified = [o for o in candidates if _brand_unverified(o)]
+    best = _cheapest(verified) or _cheapest(unverified)
     if best is None:
         return None
+    cheaper_unverified = _cheapest([o for o in unverified if o.price_cents < best.price_cents])
 
     by_band = _within(best.price_cents, ref, mult)
     reference = ref if by_band else wl.ceiling_cents
@@ -233,7 +252,13 @@ def _strike(
         versus = f"{shown} vs ceiling {fmt_money(wl.ceiling_cents)} × {mult:.2f}"
     else:
         versus = f"{shown} vs ceiling {fmt_money(wl.ceiling_cents)}"
-    message = "\n".join([title, _fare_line(target, best), f"{versus} · {_fmt_seen(best)}"])
+    lines = [title, _fare_line(target, best), f"{versus} · {_fmt_seen(best)}"]
+    if cheaper_unverified is not None:
+        lines.append(
+            f"also seen: {fmt_money(cheaper_unverified.price_cents)} "
+            f'"{cheaper_unverified.fare_brand_raw}" (brand unverified)'
+        )
+    message = "\n".join(lines)
     return _alert(target, kind, regime, message, now=now, obs=best, reference_cents=reference)
 
 
@@ -268,7 +293,12 @@ def _post_purchase(
     ours = [
         o
         for o in observations
-        if o.itinerary_key == purchase.itinerary_key and o.risk is not None and o.risk.passed
+        if o.itinerary_key == purchase.itinerary_key
+        and o.risk is not None
+        and o.risk.passed
+        and not (o.risk.brand_unverified and o.fare_brand_raw is None)
+        and o.fare_brand is not FareBrand.BASIC_ECONOMY  # a Basic fare has no credit to harvest
+        and o.changeable is not False
     ]
     best = _cheapest(ours)
     if (
@@ -299,19 +329,22 @@ def _post_purchase(
         )
 
     window = timedelta(hours=pp.dot_window_hours)
-    bought_days_ahead = (target.depart - purchase.purchased_at.astimezone(UTC).date()).days
+    bought_utc = purchase.purchased_at.astimezone(UTC)
+    # the 7-day rule is about the purchaser's calendar day, in the zone the purchase was made in
+    bought_days_ahead = (target.depart - purchase.purchased_at.date()).days
     if (
-        now - purchase.purchased_at < window
+        now - bought_utc < window
         and bought_days_ahead >= 7
         and AlertKind.DOT_24H not in state.already_alerted
     ):
-        closes = purchase.purchased_at + window
+        closes = (bought_utc + window).astimezone(purchase.purchased_at.tzinfo)
         day = (closes.date() - now.astimezone(closes.tzinfo).date()).days
         when = "today" if day <= 0 else "tomorrow" if day == 1 else _fmt_day(closes)
+        zone = closes.strftime("%Z") or _fmt_offset(closes)
         message = "\n".join(
             [
                 f"DOT {pp.dot_window_hours}h window on {fmt_route(target)} closes "
-                f"{closes:%H:%M} {when}",
+                f"{closes:%H:%M} {when} ({zone})",
                 f"{_fmt_dates(target)} · paid {fmt_money(purchase.price_cents)} · {purchase.carrier}",
                 f"Free cancellation until {closes:%b} {closes.day} {closes:%H:%M %Z}".rstrip(),
             ]
