@@ -7,7 +7,8 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from src.ingestion.airports import UnknownAirportError, localize, tz_for
+from src.ingestion import airports
+from src.ingestion.airports import UnknownAirportError, is_us, localize, tz_for
 
 
 def test_tz_for_sea_is_los_angeles():
@@ -74,3 +75,35 @@ def test_localize_rejects_aware_input_even_for_unknown_airport():
     aware = datetime(2026, 11, 25, 7, 15, tzinfo=UTC)
     with pytest.raises(ValueError):
         localize(aware, "ZZZ")
+
+
+def test_tz_for_code_whose_tz_is_missing_on_this_host_is_unknown_airport(monkeypatch):
+    """airportsdata lists some zones (Europe/Zaporozhye, Pacific/Enderbury) tzdata may not ship."""
+    table = {"BOG": {"tz": "Mars/Olympus_Mons", "country": "US"}}
+    monkeypatch.setattr(airports, "_table", lambda: table)
+    airports.tz_for.cache_clear()
+    try:
+        with pytest.raises(UnknownAirportError):
+            tz_for("BOG")
+    finally:
+        airports.tz_for.cache_clear()
+
+
+def test_localize_with_a_missing_tz_raises_unknown_airport(monkeypatch):
+    monkeypatch.setattr(airports, "_table", lambda: {"BOG": {"tz": "Mars/Olympus_Mons"}})
+    airports.tz_for.cache_clear()
+    try:
+        with pytest.raises(UnknownAirportError):
+            localize(datetime(2026, 11, 25, 7, 15), "BOG")
+    finally:
+        airports.tz_for.cache_clear()
+
+
+@pytest.mark.parametrize("code", ["SEA", "sea", "JFK", "SJC", "HNL", "ANC"])
+def test_is_us_true_for_us_airports(code):
+    assert is_us(code) is True
+
+
+@pytest.mark.parametrize("code", ["LHR", "YVR", "SYD", "MEX", "ZZZ", ""])
+def test_is_us_false_for_foreign_and_unknown_codes(code):
+    assert is_us(code) is False

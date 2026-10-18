@@ -6,7 +6,7 @@ ARCHITECTURE section 6: clients never retry; the runner owns retries and the led
 from __future__ import annotations
 
 import json
-from datetime import date
+from datetime import date, time
 from pathlib import Path
 
 import httpx
@@ -36,6 +36,9 @@ RT_EXPECTED = {
     "hl": "en",
     "gl": "us",
     "stops": "2",
+    "layover_duration": "30,180",
+    "outbound_times": "6,23,0,23",
+    "return_times": "6,23,0,23",
     "exclude_basic": "true",
 }
 
@@ -72,7 +75,10 @@ def test_one_way_uses_type_2_and_omits_return_date():
     p = params_for(target=one_way_target())
     assert p["type"] == "2"
     assert "return_date" not in p
-    assert p == {k: v for k, v in RT_EXPECTED.items() if k != "return_date"} | {"type": "2"}
+    assert "return_times" not in p
+    assert p == {
+        k: v for k, v in RT_EXPECTED.items() if k not in ("return_date", "return_times")
+    } | {"type": "2"}
 
 
 def test_never_sends_deep_search_or_no_cache():
@@ -108,6 +114,61 @@ def test_exclude_basic_omitted_when_basic_economy_allowed():
 @pytest.mark.parametrize("cabin", [Cabin.PREMIUM_ECONOMY, Cabin.BUSINESS, Cabin.FIRST])
 def test_exclude_basic_omitted_outside_economy(cabin):
     assert "exclude_basic" not in params_for(wl_with(cabin=cabin))
+
+
+# -- time and layover constraints are pushed into the request
+
+
+def times_for(earliest: time, latest: time, **c) -> dict:
+    p = params_for(
+        wl_with(Constraints(earliest_departure_local=earliest, latest_arrival_local=latest, **c))
+    )
+    return p
+
+
+@pytest.mark.parametrize(
+    ("earliest", "dep_from"),
+    [
+        (time(0, 0), 0),
+        (time(5, 59), 6),
+        (time(6, 0), 6),
+        (time(6, 1), 7),
+        (time(6, 30), 7),
+        (time(21, 0), 21),
+        (time(23, 30), 23),  # ceil would be 24: clamped, the window cannot open after 23
+    ],
+)
+def test_earliest_departure_rounds_up_to_the_next_whole_hour(earliest, dep_from):
+    p = times_for(earliest, time(23, 30))
+    assert p["outbound_times"] == f"{dep_from},23,0,23"
+    assert p["return_times"] == p["outbound_times"]
+
+
+@pytest.mark.parametrize(
+    ("latest", "arr_to"),
+    [(time(23, 30), 23), (time(23, 59), 23), (time(22, 0), 22), (time(22, 1), 22), (time(0, 0), 0)],
+)
+def test_latest_arrival_rounds_down_to_its_whole_hour(latest, arr_to):
+    p = times_for(time(6, 0), latest)
+    assert p["outbound_times"] == f"6,23,0,{arr_to}"
+
+
+def test_return_times_only_on_round_trips():
+    p = params_for(target=one_way_target())
+    assert p["outbound_times"] == "6,23,0,23"
+    assert "return_times" not in p
+
+
+def test_layover_duration_uses_the_configured_maximum():
+    assert params_for(wl_with(Constraints(max_layover_minutes=90)))["layover_duration"] == "30,90"
+    assert (
+        params_for(wl_with(Constraints(max_stops=3, max_layover_minutes=1440)))["layover_duration"]
+        == "30,1440"
+    )
+
+
+def test_layover_duration_omitted_for_nonstop_only():
+    assert "layover_duration" not in params_for(wl_with(Constraints(max_stops=0)))
 
 
 def test_passengers_and_currency_follow_the_watchlist():
@@ -281,3 +342,29 @@ def test_timeout_error_message_never_contains_the_api_key(router, provider):
     with pytest.raises(ProviderError) as exc:
         search(provider)
     assert KEY not in str(exc.value)
+
+
+def test_api_key_echoed_in_the_response_is_scrubbed_from_raw(router, provider):
+    body = payload("serpapi_sea_sjc_rt_exclude_basic.json")
+    body["search_metadata"]["json_endpoint"] = f"https://serpapi.com/searches/x.json?api_key={KEY}"
+    body["search_metadata"]["note"] = f"key was {KEY}"
+    router.get(URL).mock(return_value=httpx.Response(200, json=body))
+    res = search(provider)
+    assert KEY not in json.dumps(res.raw)
+
+
+def test_live_zero_result_response_is_empty_not_an_error(router, provider):
+    """Real API: 200 + status Success + an `error` string saying Google found nothing."""
+    body = payload("serpapi_zero_results.json")
+    assert body["search_metadata"]["status"] == "Success" and "error" in body
+    router.get(URL).mock(return_value=httpx.Response(200, json=body))
+    res = search(provider)
+    assert res.observations == [] and res.band is None
+
+
+def test_non_zero_result_error_with_success_status_is_non_retryable(router, provider):
+    body = payload("serpapi_zero_results.json") | {"error": "Something else went wrong"}
+    router.get(URL).mock(return_value=httpx.Response(200, json=body))
+    with pytest.raises(ProviderError) as exc:
+        search(provider)
+    assert exc.value.retryable is False

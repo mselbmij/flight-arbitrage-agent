@@ -1,0 +1,1061 @@
+{
+  "meta": {
+    "count": 7
+  },
+  "data": [
+    {
+      "type": "flight-offer",
+      "id": "1",
+      "source": "GDS",
+      "instantTicketingRequired": false,
+      "nonHomogeneous": false,
+      "oneWay": false,
+      "lastTicketingDate": "2026-10-20",
+      "itineraries": [
+        {
+          "duration": "PT2H15M",
+          "segments": [
+            {
+              "departure": {
+                "iataCode": "SEA",
+                "at": "2026-11-25T10:05:00"
+              },
+              "arrival": {
+                "iataCode": "SJC",
+                "at": "2026-11-25T12:20:00"
+              },
+              "carrierCode": "DL",
+              "number": "2550",
+              "aircraft": {
+                "code": "738"
+              },
+              "duration": "PT2H10M",
+              "id": "1",
+              "numberOfStops": 0,
+              "blacklistedInEU": false
+            }
+          ]
+        },
+        {
+          "duration": "PT2H30M",
+          "segments": [
+            {
+              "departure": {
+                "iataCode": "SJC",
+                "at": "2026-11-29T18:00:00"
+              },
+              "arrival": {
+                "iataCode": "SEA",
+                "at": "2026-11-29T20:30:00"
+              },
+              "carrierCode": "DL",
+              "number": "2551",
+              "aircraft": {
+                "code": "738"
+              },
+              "duration": "PT2H10M",
+              "id": "2",
+              "numberOfStops": 0,
+              "blacklistedInEU": false
+            }
+          ]
+        }
+      ],
+      "price": {
+        "currency": "USD",
+        "total": "180.00",
+        "base": "150.00",
+        "fees": [
+          {
+            "amount": "0.00",
+            "type": "SUPPLIER"
+          }
+        ],
+        "grandTotal": "180.00"
+      },
+      "pricingOptions": {
+        "fareType": [
+          "PUBLISHED"
+        ],
+        "includedCheckedBagsOnly": false
+      },
+      "validatingAirlineCodes": [
+        "DL"
+      ],
+      "travelerPricings": [
+        {
+          "travelerId": "1",
+          "fareOption": "STANDARD",
+          "travelerType": "ADULT",
+          "price": {
+            "currency": "USD",
+            "total": "180.00",
+            "base": "150.00"
+          },
+          "fareDetailsBySegment": [
+            {
+              "segmentId": "1",
+              "cabin": "ECONOMY",
+              "fareBasis": "QOBAS",
+              "class": "Q",
+              "brandedFare": "MAIN",
+              "brandedFareLabel": "Main Cabin",
+              "includedCabinBags": {
+                "quantity": 1
+              },
+              "amenities": [
+                {
+                  "description": "CHANGEABLE TICKET",
+                  "isChargeable": false,
+                  "amenityType": "BRANDED_FARES"
+                },
+                {
+                  "description": "REFUNDABLE TICKET",
+                  "isChargeable": true,
+                  "amenityType": "BRANDED_FARES"
+                }
+              ]
+            },
+            {
+              "segmentId": "2",
+              "cabin": "ECONOMY",
+              "fareBasis": "QOBAS",
+              "class": "Q",
+              "brandedFare": "BASIC",
+              "brandedFareLabel": "BASIC ECONOMY",
+              "includedCabinBags": {
+                "quantity": 0
+              },
+              "amenities": [
+                {
+                  "description": "CHANGEABLE TICKET",
+                  "isChargeable": true,
+                  "amenityType": "BRANDED_FARES"
+                },
+                {
+                  "description": "REFUNDABLE TICKET",
+                  "isChargeable": true,
+                  "amenityType": "BRANDED_FARES"
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "numberOfBookableSeats": 9
+    },
+    {
+      "type": "flight-offer",
+      "id": "2",
+      "source": "GDS",
+      "instantTicketingRequired": false,
+      "nonHomogeneous": false,
+      "oneWay": false,
+      "lastTicketingDate": "2026-10-20",
+      "itineraries": [
+        {
+          "duration": "PT2H15M",
+          "segments": [
+            {
+              "departure": {
+                "iataCode": "SEA",
+                "at": "2026-11-25T10:05:00"
+              },
+              "arrival": {
+                "iataCode": "SJC",
+                "at": "2026-11-25T12:20:00"
+              },
+              "carrierCode": "DL",
+              "number": "2560",
+              "aircraft": {
+                "code": "738"
+              },
+              "duration": "PT2H10M",
+              "id": "3",
+              "numberOfStops": 0,
+              "blacklistedInEU": false
+            }
+          ]
+        },
+        {
+          "duration": "PT2H30M",
+          "segments": [
+            {
+              "departure": {
+                "iataCode": "SJC",
+                "at": "2026-11-29T18:00:00"
+              },
+              "arrival": {
+                "iataCode": "SEA",
+                "at": "2026-11-29T20:30:00"
+              },
+              "carrierCode": "DL",
+              "number": "2561",
+              "aircraft": {
+                "code": "738"
+              },
+              "duration": "PT2H10M",
+              "id": "4",
+              "numberOfStops": 0,
+              "blacklistedInEU": false
+            }
+          ]
+        }
+      ],
+      "price": {
+        "currency": "USD",
+        "total": "190.00",
+        "base": "150.00",
+        "fees": [
+          {
+            "amount": "0.00",
+            "type": "SUPPLIER"
+          }
+        ],
+        "grandTotal": "190.00"
+      },
+      "pricingOptions": {
+        "fareType": [
+          "PUBLISHED"
+        ],
+        "includedCheckedBagsOnly": false
+      },
+      "validatingAirlineCodes": [
+        "DL"
+      ],
+      "travelerPricings": [
+        {
+          "travelerId": "1",
+          "fareOption": "STANDARD",
+          "travelerType": "ADULT",
+          "price": {
+            "currency": "USD",
+            "total": "190.00",
+            "base": "150.00"
+          },
+          "fareDetailsBySegment": [
+            {
+              "segmentId": "3",
+              "cabin": "ECONOMY",
+              "fareBasis": "QOBAS",
+              "class": "Q",
+              "brandedFare": "MAIN",
+              "brandedFareLabel": "Main Cabin",
+              "includedCabinBags": {
+                "quantity": 1
+              },
+              "amenities": [
+                {
+                  "description": "CHANGEABLE TICKET",
+                  "isChargeable": false,
+                  "amenityType": "BRANDED_FARES"
+                },
+                {
+                  "description": "REFUNDABLE TICKET",
+                  "isChargeable": true,
+                  "amenityType": "BRANDED_FARES"
+                }
+              ]
+            },
+            {
+              "segmentId": "4",
+              "cabin": "ECONOMY",
+              "fareBasis": "QOBAS",
+              "class": "Q"
+            }
+          ]
+        }
+      ],
+      "numberOfBookableSeats": 9
+    },
+    {
+      "type": "flight-offer",
+      "id": "3",
+      "source": "GDS",
+      "instantTicketingRequired": false,
+      "nonHomogeneous": false,
+      "oneWay": false,
+      "lastTicketingDate": "2026-10-20",
+      "itineraries": [
+        {
+          "duration": "PT2H15M",
+          "segments": [
+            {
+              "departure": {
+                "iataCode": "SEA",
+                "at": "2026-11-25T10:05:00"
+              },
+              "arrival": {
+                "iataCode": "SJC",
+                "at": "2026-11-25T12:20:00"
+              },
+              "carrierCode": "DL",
+              "number": "2570",
+              "aircraft": {
+                "code": "738"
+              },
+              "duration": "PT2H10M",
+              "id": "5",
+              "numberOfStops": 0,
+              "blacklistedInEU": false
+            }
+          ]
+        },
+        {
+          "duration": "PT2H30M",
+          "segments": [
+            {
+              "departure": {
+                "iataCode": "SJC",
+                "at": "2026-11-29T18:00:00"
+              },
+              "arrival": {
+                "iataCode": "SEA",
+                "at": "2026-11-29T20:30:00"
+              },
+              "carrierCode": "DL",
+              "number": "2571",
+              "aircraft": {
+                "code": "738"
+              },
+              "duration": "PT2H10M",
+              "id": "6",
+              "numberOfStops": 0,
+              "blacklistedInEU": false
+            }
+          ]
+        }
+      ],
+      "price": {
+        "currency": "USD",
+        "total": "200.00",
+        "base": "150.00",
+        "fees": [
+          {
+            "amount": "0.00",
+            "type": "SUPPLIER"
+          }
+        ],
+        "grandTotal": "200.00"
+      },
+      "pricingOptions": {
+        "fareType": [
+          "PUBLISHED"
+        ],
+        "includedCheckedBagsOnly": false
+      },
+      "validatingAirlineCodes": [
+        "DL"
+      ],
+      "travelerPricings": [
+        {
+          "travelerId": "1",
+          "fareOption": "STANDARD",
+          "travelerType": "ADULT",
+          "price": {
+            "currency": "USD",
+            "total": "200.00",
+            "base": "150.00"
+          },
+          "fareDetailsBySegment": [
+            {
+              "segmentId": "5",
+              "cabin": "ECONOMY",
+              "fareBasis": "QOBAS",
+              "class": "Q",
+              "brandedFare": "COMFORTPLUS",
+              "brandedFareLabel": "COMFORT+",
+              "includedCabinBags": {
+                "quantity": 1
+              },
+              "amenities": [
+                {
+                  "description": "CHANGEABLE TICKET",
+                  "isChargeable": false,
+                  "amenityType": "BRANDED_FARES"
+                },
+                {
+                  "description": "REFUNDABLE TICKET",
+                  "isChargeable": true,
+                  "amenityType": "BRANDED_FARES"
+                }
+              ]
+            },
+            {
+              "segmentId": "6",
+              "cabin": "ECONOMY",
+              "fareBasis": "QOBAS",
+              "class": "Q",
+              "brandedFare": "MAIN",
+              "brandedFareLabel": "Main Cabin",
+              "includedCabinBags": {
+                "quantity": 1
+              },
+              "amenities": [
+                {
+                  "description": "CHANGEABLE TICKET",
+                  "isChargeable": false,
+                  "amenityType": "BRANDED_FARES"
+                },
+                {
+                  "description": "REFUNDABLE TICKET",
+                  "isChargeable": true,
+                  "amenityType": "BRANDED_FARES"
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "numberOfBookableSeats": 9
+    },
+    {
+      "type": "flight-offer",
+      "id": "4",
+      "source": "GDS",
+      "instantTicketingRequired": false,
+      "nonHomogeneous": false,
+      "oneWay": false,
+      "lastTicketingDate": "2026-10-20",
+      "itineraries": [
+        {
+          "duration": "PT2H15M",
+          "segments": [
+            {
+              "departure": {
+                "iataCode": "SEA",
+                "at": "2026-11-25T10:05:00"
+              },
+              "arrival": {
+                "iataCode": "SJC",
+                "at": "2026-11-25T12:20:00"
+              },
+              "carrierCode": "DL",
+              "number": "2580",
+              "aircraft": {
+                "code": "738"
+              },
+              "duration": "PT2H10M",
+              "id": "7",
+              "numberOfStops": 0,
+              "blacklistedInEU": false
+            }
+          ]
+        },
+        {
+          "duration": "PT2H30M",
+          "segments": [
+            {
+              "departure": {
+                "iataCode": "SJC",
+                "at": "2026-11-29T18:00:00"
+              },
+              "arrival": {
+                "iataCode": "SEA",
+                "at": "2026-11-29T20:30:00"
+              },
+              "carrierCode": "DL",
+              "number": "2581",
+              "aircraft": {
+                "code": "738"
+              },
+              "duration": "PT2H10M",
+              "id": "8",
+              "numberOfStops": 0,
+              "blacklistedInEU": false
+            }
+          ]
+        }
+      ],
+      "price": {
+        "currency": "USD",
+        "total": "210.00",
+        "base": "150.00",
+        "fees": [
+          {
+            "amount": "0.00",
+            "type": "SUPPLIER"
+          }
+        ],
+        "grandTotal": "210.00"
+      },
+      "pricingOptions": {
+        "fareType": [
+          "PUBLISHED"
+        ],
+        "includedCheckedBagsOnly": false
+      },
+      "validatingAirlineCodes": [
+        "DL"
+      ],
+      "travelerPricings": [
+        {
+          "travelerId": "1",
+          "fareOption": "STANDARD",
+          "travelerType": "ADULT",
+          "price": {
+            "currency": "USD",
+            "total": "210.00",
+            "base": "150.00"
+          },
+          "fareDetailsBySegment": [
+            {
+              "segmentId": "7",
+              "cabin": "ECONOMY",
+              "fareBasis": "QOBAS",
+              "class": "Q",
+              "brandedFare": "MAIN",
+              "brandedFareLabel": "Main Cabin",
+              "includedCabinBags": {
+                "quantity": 1
+              },
+              "amenities": [
+                {
+                  "description": "CHANGEABLE TICKET",
+                  "isChargeable": false,
+                  "amenityType": "BRANDED_FARES"
+                },
+                {
+                  "description": "REFUNDABLE TICKET",
+                  "isChargeable": true,
+                  "amenityType": "BRANDED_FARES"
+                }
+              ]
+            },
+            {
+              "segmentId": "8",
+              "cabin": "ECONOMY",
+              "fareBasis": "QOBAS",
+              "class": "Q",
+              "brandedFare": "MAIN",
+              "brandedFareLabel": "Main Cabin",
+              "includedCabinBags": {
+                "quantity": 1
+              },
+              "amenities": [
+                {
+                  "description": "CHANGEABLE TICKET",
+                  "isChargeable": false,
+                  "amenityType": "BRANDED_FARES"
+                },
+                {
+                  "description": "REFUNDABLE TICKET",
+                  "isChargeable": true,
+                  "amenityType": "BRANDED_FARES"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "travelerId": "2",
+          "fareOption": "STANDARD",
+          "travelerType": "ADULT",
+          "price": {
+            "currency": "USD",
+            "total": "210.00",
+            "base": "150.00"
+          },
+          "fareDetailsBySegment": [
+            {
+              "segmentId": "7",
+              "cabin": "ECONOMY",
+              "fareBasis": "QOBAS",
+              "class": "Q",
+              "brandedFare": "MAIN",
+              "brandedFareLabel": "Main Cabin",
+              "includedCabinBags": {
+                "quantity": 1
+              },
+              "amenities": [
+                {
+                  "description": "CHANGEABLE TICKET",
+                  "isChargeable": false,
+                  "amenityType": "BRANDED_FARES"
+                },
+                {
+                  "description": "REFUNDABLE TICKET",
+                  "isChargeable": true,
+                  "amenityType": "BRANDED_FARES"
+                }
+              ]
+            },
+            {
+              "segmentId": "8",
+              "cabin": "ECONOMY",
+              "fareBasis": "QOBAS",
+              "class": "Q",
+              "brandedFare": "BASIC",
+              "brandedFareLabel": "BASIC ECONOMY",
+              "includedCabinBags": {
+                "quantity": 0
+              },
+              "amenities": [
+                {
+                  "description": "CHANGEABLE TICKET",
+                  "isChargeable": true,
+                  "amenityType": "BRANDED_FARES"
+                },
+                {
+                  "description": "REFUNDABLE TICKET",
+                  "isChargeable": true,
+                  "amenityType": "BRANDED_FARES"
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "numberOfBookableSeats": 9
+    },
+    {
+      "type": "flight-offer",
+      "id": "5",
+      "source": "GDS",
+      "instantTicketingRequired": false,
+      "nonHomogeneous": false,
+      "oneWay": false,
+      "lastTicketingDate": "2026-10-20",
+      "itineraries": [
+        {
+          "duration": "PT2H15M",
+          "segments": [
+            {
+              "departure": {
+                "iataCode": "SEA",
+                "at": "2026-11-25T10:05:00"
+              },
+              "arrival": {
+                "iataCode": "SJC",
+                "at": "2026-11-25T12:20:00"
+              },
+              "carrierCode": "AS",
+              "number": "2590",
+              "aircraft": {
+                "code": "738"
+              },
+              "duration": "PT2H10M",
+              "id": "9",
+              "numberOfStops": 0,
+              "blacklistedInEU": false
+            }
+          ]
+        },
+        {
+          "duration": "PT2H30M",
+          "segments": [
+            {
+              "departure": {
+                "iataCode": "SJC",
+                "at": "2026-11-29T18:00:00"
+              },
+              "arrival": {
+                "iataCode": "SEA",
+                "at": "2026-11-29T20:30:00"
+              },
+              "carrierCode": "DL",
+              "number": "2591",
+              "aircraft": {
+                "code": "738"
+              },
+              "duration": "PT2H10M",
+              "id": "10",
+              "numberOfStops": 0,
+              "blacklistedInEU": false
+            }
+          ]
+        }
+      ],
+      "price": {
+        "currency": "USD",
+        "total": "170.00",
+        "base": "150.00",
+        "fees": [
+          {
+            "amount": "0.00",
+            "type": "SUPPLIER"
+          }
+        ],
+        "grandTotal": "170.00"
+      },
+      "pricingOptions": {
+        "fareType": [
+          "PUBLISHED"
+        ],
+        "includedCheckedBagsOnly": false
+      },
+      "validatingAirlineCodes": [
+        "AS"
+      ],
+      "travelerPricings": [
+        {
+          "travelerId": "1",
+          "fareOption": "STANDARD",
+          "travelerType": "ADULT",
+          "price": {
+            "currency": "USD",
+            "total": "170.00",
+            "base": "150.00"
+          },
+          "fareDetailsBySegment": [
+            {
+              "segmentId": "9",
+              "cabin": "ECONOMY",
+              "fareBasis": "QOBAS",
+              "class": "Q",
+              "brandedFare": "SAVER",
+              "brandedFareLabel": "Saver",
+              "includedCabinBags": {
+                "quantity": 0
+              },
+              "amenities": [
+                {
+                  "description": "CHANGEABLE TICKET",
+                  "isChargeable": true,
+                  "amenityType": "BRANDED_FARES"
+                },
+                {
+                  "description": "REFUNDABLE TICKET",
+                  "isChargeable": true,
+                  "amenityType": "BRANDED_FARES"
+                }
+              ]
+            },
+            {
+              "segmentId": "10",
+              "cabin": "ECONOMY",
+              "fareBasis": "QOBAS",
+              "class": "Q",
+              "brandedFare": "MAIN",
+              "brandedFareLabel": "Main Cabin",
+              "includedCabinBags": {
+                "quantity": 1
+              },
+              "amenities": [
+                {
+                  "description": "CHANGEABLE TICKET",
+                  "isChargeable": false,
+                  "amenityType": "BRANDED_FARES"
+                },
+                {
+                  "description": "REFUNDABLE TICKET",
+                  "isChargeable": true,
+                  "amenityType": "BRANDED_FARES"
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "numberOfBookableSeats": 9
+    },
+    {
+      "type": "flight-offer",
+      "id": "6",
+      "source": "GDS",
+      "instantTicketingRequired": false,
+      "nonHomogeneous": false,
+      "oneWay": false,
+      "lastTicketingDate": "2026-10-20",
+      "itineraries": [
+        {
+          "duration": "PT2H15M",
+          "segments": [
+            {
+              "departure": {
+                "iataCode": "SEA",
+                "at": "2026-11-25T10:05:00"
+              },
+              "arrival": {
+                "iataCode": "SJC",
+                "at": "2026-11-25T12:20:00"
+              },
+              "carrierCode": "DL",
+              "number": "2600",
+              "aircraft": {
+                "code": "738"
+              },
+              "duration": "PT2H10M",
+              "id": "11",
+              "numberOfStops": 0,
+              "blacklistedInEU": false
+            }
+          ]
+        },
+        {
+          "duration": "PT2H30M",
+          "segments": [
+            {
+              "departure": {
+                "iataCode": "SJC",
+                "at": "2026-11-29T18:00:00"
+              },
+              "arrival": {
+                "iataCode": "SEA",
+                "at": "2026-11-29T20:30:00"
+              },
+              "carrierCode": "DL",
+              "number": "2601",
+              "aircraft": {
+                "code": "738"
+              },
+              "duration": "PT2H10M",
+              "id": "12",
+              "numberOfStops": 0,
+              "blacklistedInEU": false
+            }
+          ]
+        }
+      ],
+      "price": {
+        "currency": "USD",
+        "total": "175.00",
+        "base": "150.00",
+        "fees": [
+          {
+            "amount": "0.00",
+            "type": "SUPPLIER"
+          }
+        ],
+        "grandTotal": "175.00"
+      },
+      "pricingOptions": {
+        "fareType": [
+          "PUBLISHED"
+        ],
+        "includedCheckedBagsOnly": false
+      },
+      "validatingAirlineCodes": [
+        "DL"
+      ],
+      "travelerPricings": [
+        {
+          "travelerId": "1",
+          "fareOption": "STANDARD",
+          "travelerType": "ADULT",
+          "price": {
+            "currency": "USD",
+            "total": "175.00",
+            "base": "150.00"
+          },
+          "fareDetailsBySegment": [
+            {
+              "segmentId": "11",
+              "cabin": "ECONOMY",
+              "fareBasis": "QOBAS",
+              "class": "Q",
+              "brandedFare": "SAVER",
+              "brandedFareLabel": "Saver",
+              "includedCabinBags": {
+                "quantity": 1
+              },
+              "amenities": [
+                {
+                  "description": "CHANGEABLE TICKET",
+                  "isChargeable": true,
+                  "amenityType": "BRANDED_FARES"
+                },
+                {
+                  "description": "REFUNDABLE TICKET",
+                  "isChargeable": true,
+                  "amenityType": "BRANDED_FARES"
+                }
+              ]
+            },
+            {
+              "segmentId": "12",
+              "cabin": "ECONOMY",
+              "fareBasis": "QOBAS",
+              "class": "Q",
+              "brandedFare": "SAVER",
+              "brandedFareLabel": "Saver",
+              "includedCabinBags": {
+                "quantity": 1
+              },
+              "amenities": [
+                {
+                  "description": "CHANGEABLE TICKET",
+                  "isChargeable": true,
+                  "amenityType": "BRANDED_FARES"
+                },
+                {
+                  "description": "REFUNDABLE TICKET",
+                  "isChargeable": true,
+                  "amenityType": "BRANDED_FARES"
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "numberOfBookableSeats": 9
+    },
+    {
+      "type": "flight-offer",
+      "id": "7",
+      "source": "GDS",
+      "instantTicketingRequired": false,
+      "nonHomogeneous": false,
+      "oneWay": false,
+      "lastTicketingDate": "2026-10-20",
+      "itineraries": [
+        {
+          "duration": "PT2H15M",
+          "segments": [
+            {
+              "departure": {
+                "iataCode": "SEA",
+                "at": "2026-11-25T10:05:00"
+              },
+              "arrival": {
+                "iataCode": "SJC",
+                "at": "2026-11-25T12:20:00"
+              },
+              "carrierCode": "DL",
+              "number": "2610",
+              "aircraft": {
+                "code": "738"
+              },
+              "duration": "PT2H10M",
+              "id": "13",
+              "numberOfStops": 0,
+              "blacklistedInEU": false
+            }
+          ]
+        },
+        {
+          "duration": "PT2H30M",
+          "segments": [
+            {
+              "departure": {
+                "iataCode": "SJC",
+                "at": "2026-11-29T18:00:00"
+              },
+              "arrival": {
+                "iataCode": "SEA",
+                "at": "2026-11-29T20:30:00"
+              },
+              "carrierCode": "DL",
+              "number": "2611",
+              "aircraft": {
+                "code": "738"
+              },
+              "duration": "PT2H10M",
+              "id": "14",
+              "numberOfStops": 0,
+              "blacklistedInEU": false
+            }
+          ]
+        }
+      ],
+      "price": {
+        "currency": "USD",
+        "total": "220.00",
+        "base": "150.00",
+        "fees": [
+          {
+            "amount": "0.00",
+            "type": "SUPPLIER"
+          }
+        ],
+        "grandTotal": "220.00"
+      },
+      "pricingOptions": {
+        "fareType": [
+          "PUBLISHED"
+        ],
+        "includedCheckedBagsOnly": false
+      },
+      "validatingAirlineCodes": [
+        "DL"
+      ],
+      "travelerPricings": [
+        {
+          "travelerId": "1",
+          "fareOption": "STANDARD",
+          "travelerType": "ADULT",
+          "price": {
+            "currency": "USD",
+            "total": "220.00",
+            "base": "150.00"
+          },
+          "fareDetailsBySegment": [
+            {
+              "segmentId": "13",
+              "cabin": "ECONOMY",
+              "fareBasis": "QOBAS",
+              "class": "Q",
+              "brandedFare": "MAIN",
+              "brandedFareLabel": "Main Cabin",
+              "includedCabinBags": {
+                "quantity": 1
+              },
+              "amenities": [
+                {
+                  "description": "CHANGEABLE TICKET",
+                  "isChargeable": false,
+                  "amenityType": "BRANDED_FARES"
+                },
+                {
+                  "description": "REFUNDABLE TICKET",
+                  "isChargeable": true,
+                  "amenityType": "BRANDED_FARES"
+                }
+              ]
+            },
+            {
+              "segmentId": "14",
+              "cabin": "ECONOMY",
+              "fareBasis": "QOBAS",
+              "class": "Q",
+              "brandedFare": "MAIN",
+              "brandedFareLabel": "Main Cabin",
+              "amenities": [
+                {
+                  "description": "CHANGEABLE TICKET",
+                  "isChargeable": false,
+                  "amenityType": "BRANDED_FARES"
+                },
+                {
+                  "description": "REFUNDABLE TICKET",
+                  "isChargeable": true,
+                  "amenityType": "BRANDED_FARES"
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "numberOfBookableSeats": 9
+    }
+  ],
+  "dictionaries": {
+    "locations": {
+      "SEA": {
+        "cityCode": "SEA",
+        "countryCode": "US"
+      },
+      "SJC": {
+        "cityCode": "SJC",
+        "countryCode": "US"
+      },
+      "ZZZ": {
+        "cityCode": "ZZZ",
+        "countryCode": "US"
+      }
+    },
+    "aircraft": {
+      "738": "BOEING 737-800",
+      "E75": "EMBRAER 175"
+    },
+    "currencies": {
+      "USD": "US DOLLAR"
+    },
+    "carriers": {
+      "AS": "ALASKA AIRLINES",
+      "DL": "DELTA AIR LINES",
+      "UA": "UNITED AIRLINES",
+      "QX": "HORIZON AIR"
+    }
+  }
+}

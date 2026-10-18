@@ -76,16 +76,32 @@ def run_parse(payload, wl=None, observed_at=T0, provider=Provider.MOCK):
         ("ECONOMY", "MAIN", "Main Cabin", (B.MAIN_CABIN, "Main Cabin")),
         ("ECONOMY", "STANDARD", None, (B.MAIN_CABIN, "STANDARD")),
         ("ECONOMY", "CLASSIC", None, (B.MAIN_CABIN, "CLASSIC")),
-        ("ECONOMY", "SAVER", None, (B.MAIN_CABIN, "SAVER")),
-        ("ECONOMY", "LIGHT", None, (B.MAIN_CABIN, "LIGHT")),
-        ("ECONOMY", None, "Economy", (B.MAIN_CABIN, "Economy")),
         ("ECONOMY", "ECO", None, (B.MAIN_CABIN, "ECO")),
+        ("ECONOMY", None, "Eco Fare", (B.MAIN_CABIN, "Eco Fare")),
+        # ECO is a whole word only: "ECONOMY" / "ECOLOGY" are not the ECO brand
+        ("ECONOMY", None, "Ecology Fare", (B.UNKNOWN, "Ecology Fare")),
+        # a label that is exactly the cabin name is not brand evidence -> cabin fallback
+        ("ECONOMY", None, "Economy", (B.UNKNOWN, "Economy")),
+        ("ECONOMY", "ECONOMY", None, (B.UNKNOWN, "ECONOMY")),
+        ("PREMIUM_ECONOMY", None, "Premium Economy", (B.PREMIUM_ECONOMY, "Premium Economy")),
+        ("BUSINESS", None, "Business", (B.BUSINESS, "Business")),
+        ("FIRST", None, "First", (B.FIRST, "First")),
+        # LIGHT is Basic Economy on any carrier (and not a MAIN_CABIN word)
+        ("ECONOMY", "LIGHT", None, (B.BASIC_ECONOMY, "LIGHT")),
+        ("ECONOMY", None, "Economy Light", (B.BASIC_ECONOMY, "Economy Light")),
+        # SAVER with no carrier is unknown, never main cabin
+        ("ECONOMY", "SAVER", None, (B.UNKNOWN, "SAVER")),
         (None, "MAIN", None, (B.MAIN_CABIN, "MAIN")),
         # label is preferred as the raw string; a keyword in either field still maps
         ("ECONOMY", "MAIN", "Main Cabin", (B.MAIN_CABIN, "Main Cabin")),
-        ("ECONOMY", "SAVER", "Fare of the day", (B.MAIN_CABIN, "Fare of the day")),
-        # a brand keyword outranks the cabin fallback
-        ("BUSINESS", "MAIN", None, (B.MAIN_CABIN, "MAIN")),
+        ("ECONOMY", "SAVER", "Fare of the day", (B.UNKNOWN, "Fare of the day")),
+        # in a BUSINESS/FIRST cabin the cabin outranks every economy-family keyword
+        ("BUSINESS", "MAIN", None, (B.BUSINESS, "MAIN")),
+        ("BUSINESS", "SAVER", "Business Saver", (B.BUSINESS, "Business Saver")),
+        ("BUSINESS", "FLEX", "Business Flex", (B.BUSINESS, "Business Flex")),
+        ("FIRST", "LIGHT", None, (B.FIRST, "LIGHT")),
+        # ...but a Basic label still wins
+        ("BUSINESS", "BASIC", None, (B.BASIC_ECONOMY, "BASIC")),
         # cabin fallback when no keyword matched (raw string kept for mapping fixes)
         ("BUSINESS", None, None, (B.BUSINESS, None)),
         ("FIRST", None, None, (B.FIRST, None)),
@@ -100,6 +116,29 @@ def run_parse(payload, wl=None, observed_at=T0, provider=Provider.MOCK):
 )
 def test_map_brand(cabin, fare, label, expected):
     assert map_brand(cabin, fare, label) == expected
+
+
+@pytest.mark.parametrize(
+    ("carrier", "expected"),
+    [
+        ("AS", B.BASIC_ECONOMY),  # Alaska Saver is its Basic Economy product
+        ("as", B.BASIC_ECONOMY),
+        ("DL", B.UNKNOWN),
+        ("UA", B.UNKNOWN),
+        (None, B.UNKNOWN),
+    ],
+)
+def test_map_brand_saver_is_basic_only_on_alaska(carrier, expected):
+    assert map_brand("ECONOMY", "SAVER", "Saver", carrier=carrier) == (expected, "Saver")
+
+
+@pytest.mark.parametrize("carrier", ["AS", "DL", "LH", None])
+def test_map_brand_light_is_basic_on_every_carrier(carrier):
+    assert map_brand("ECONOMY", "LIGHT", None, carrier=carrier) == (B.BASIC_ECONOMY, "LIGHT")
+
+
+def test_map_brand_saver_with_a_main_keyword_is_still_unknown_off_alaska():
+    assert map_brand("ECONOMY", "MAIN", "Main Saver", carrier="DL") == (B.UNKNOWN, "Main Saver")
 
 
 # --------------------------------------------------------------------------- spec example
@@ -277,6 +316,57 @@ def test_branded_identity_comes_from_the_requested_target(branded):
     for o in branded.observations:
         assert (o.watchlist_id, o.target_id) == (WL, target.target_id)
         assert o.days_to_departure == (date(2026, 11, 25) - T0.date()).days
+
+
+# --------------------------------------------------------------------------- mixed-brand offers
+
+
+@pytest.fixture(scope="module")
+def mixed():
+    return run_parse(load("amadeus_mixed_brand.json"), provider=Provider.AMADEUS).observations
+
+
+def test_mixed_brand_offers_all_parse(mixed):
+    assert len(mixed) == 7
+
+
+def test_a_basic_return_segment_makes_the_whole_offer_basic_economy(mixed):
+    # segment 1 is Main Cabin; the verdict must not be segment 1's
+    assert (mixed[0].fare_brand, mixed[0].fare_brand_raw) == (B.BASIC_ECONOMY, "BASIC ECONOMY")
+
+
+def test_a_basic_segment_on_the_second_traveler_makes_the_offer_basic_economy(mixed):
+    assert (mixed[3].fare_brand, mixed[3].fare_brand_raw) == (B.BASIC_ECONOMY, "BASIC ECONOMY")
+
+
+def test_a_segment_with_no_brand_data_makes_the_offer_unknown(mixed):
+    assert (mixed[1].fare_brand, mixed[1].fare_brand_raw) == (B.UNKNOWN, None)
+
+
+def test_otherwise_the_lowest_tier_present_decides(mixed):
+    # COMFORT+ outbound, Main Cabin return -> MAIN_CABIN, raw is the deciding (return) segment's
+    assert (mixed[2].fare_brand, mixed[2].fare_brand_raw) == (B.MAIN_CABIN, "Main Cabin")
+
+
+def test_saver_is_judged_per_segment_carrier(mixed):
+    # AS outbound Saver is Basic Economy; the same label on DL on both legs is unknown
+    assert (mixed[4].fare_brand, mixed[4].fare_brand_raw) == (B.BASIC_ECONOMY, "Saver")
+    assert (mixed[5].fare_brand, mixed[5].fare_brand_raw) == (B.UNKNOWN, "Saver")
+
+
+def test_carry_on_is_true_only_if_every_segment_includes_one(mixed):
+    # 0: main(1 bag) + basic(0 bags) -> False; 1: 1 bag + no info -> None; 2: all bags -> True
+    # 3: second traveler's basic leg has 0 bags -> False; 6: one segment silent -> None
+    assert [o.carry_on_included for o in mixed] == [False, None, True, False, False, True, None]
+
+
+def test_changeable_is_true_only_if_every_segment_is_changeable(mixed):
+    # offer 1 mixes a free-change leg with a chargeable one; offers 3 and 7 are free-change throughout
+    assert [o.changeable for o in mixed] == [None, None, True, None, None, None, True]
+
+
+def test_refundable_needs_every_segment_to_be_refundable(mixed):
+    assert [o.refundable for o in mixed] == [None] * 7
 
 
 # --------------------------------------------------------------------------- provider stamp

@@ -13,6 +13,7 @@ Messages in `ProviderError` never contain the client secret or the bearer token.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -47,11 +48,25 @@ TRAVEL_CLASS = {
     Cabin.FIRST: "FIRST",
 }
 
-# Brand keyword tables, checked in this order (see `map_brand`). Extend as `fare_brand_raw`
+# Brand keyword tables, checked in the order `map_brand` documents. Extend as `fare_brand_raw`
 # values show up in the DB.
 _MAIN_PLUS_WORDS = ("COMFORT", "PLUS", "PREFERRED", "EXTRA", "FLEX")
-_MAIN_CABIN_WORDS = ("MAIN", "STANDARD", "CLASSIC", "SAVER", "ECO", "LIGHT")
+_MAIN_CABIN_WORDS = ("MAIN", "STANDARD", "CLASSIC")
+_ECO_WORD = re.compile(r"\bECO\b")
 _ECONOMY_FAMILY = ("ECONOMY", "PREMIUM_ECONOMY")
+_PREMIUM_CABINS = {"BUSINESS": FareBrand.BUSINESS, "FIRST": FareBrand.FIRST}
+#: A brand field that is just the cabin's own name says nothing about the fare product.
+_CABIN_NAMES = frozenset({"ECONOMY", "PREMIUM ECONOMY", "BUSINESS", "FIRST"})
+#: Carriers whose "SAVER" fare is a Basic Economy product. Any other carrier's SAVER is unknown.
+_SAVER_IS_BASIC = frozenset({"AS"})
+#: Lowest to highest. A multi-segment offer is only as good as its worst segment.
+_TIER_ORDER = (
+    FareBrand.MAIN_CABIN,
+    FareBrand.MAIN_PLUS,
+    FareBrand.PREMIUM_ECONOMY,
+    FareBrand.BUSINESS,
+    FareBrand.FIRST,
+)
 
 
 def utcnow() -> datetime:
@@ -85,34 +100,45 @@ def build_params(target: SearchTarget, watchlist: ResolvedWatchlist) -> dict[str
 
 
 def map_brand(
-    cabin: str | None, branded_fare: str | None, branded_fare_label: str | None
+    cabin: str | None,
+    branded_fare: str | None,
+    branded_fare_label: str | None,
+    *,
+    carrier: str | None = None,
 ) -> tuple[FareBrand, str | None]:
-    """Map Amadeus brand fields onto `FareBrand`; returns (brand, fare_brand_raw).
+    """Map one segment's Amadeus brand fields onto `FareBrand`; returns (brand, fare_brand_raw).
 
-    Precedence: BASIC beats everything; PREMIUM counts only in an economy-family cabin;
-    MAIN_PLUS keywords beat MAIN_CABIN keywords; with no keyword the cabin decides
-    (PREMIUM_ECONOMY / BUSINESS / FIRST); otherwise UNKNOWN. The raw string is the label,
-    else the brand code, else None, and is kept even when it matched nothing.
+    Precedence: BASIC beats everything; in a BUSINESS/FIRST cabin the cabin wins over every
+    economy-family keyword; LIGHT is Basic Economy on any carrier, SAVER only on Alaska (`AS`) and
+    otherwise UNKNOWN; PREMIUM counts only in an economy-family cabin; MAIN_PLUS keywords beat
+    MAIN_CABIN keywords (MAIN, STANDARD, CLASSIC, whole-word ECO); with no keyword the cabin decides
+    (PREMIUM_ECONOMY); otherwise UNKNOWN. A field that is only the cabin's name ("ECONOMY") is not
+    brand evidence. The raw string is the label, else the brand code, else None, and is kept even
+    when it matched nothing.
     """
     raw = branded_fare_label or branded_fare or None
-    text = f"{branded_fare or ''} {branded_fare_label or ''}".upper()
+    fields = [f for f in (branded_fare, branded_fare_label) if f]
+    evidence = [f for f in fields if f.strip().upper().replace("_", " ") not in _CABIN_NAMES]
+    text = " ".join(evidence).upper()
     cabin_u = (cabin or "").upper()
 
     if "BASIC" in text:
         return FareBrand.BASIC_ECONOMY, raw
+    if cabin_u in _PREMIUM_CABINS:
+        return _PREMIUM_CABINS[cabin_u], raw
+    if "LIGHT" in text:
+        return FareBrand.BASIC_ECONOMY, raw
+    if "SAVER" in text:
+        saver_is_basic = (carrier or "").upper() in _SAVER_IS_BASIC
+        return (FareBrand.BASIC_ECONOMY if saver_is_basic else FareBrand.UNKNOWN), raw
     if "PREMIUM" in text and cabin_u in _ECONOMY_FAMILY:
         return FareBrand.PREMIUM_ECONOMY, raw
     if any(w in text for w in _MAIN_PLUS_WORDS):
         return FareBrand.MAIN_PLUS, raw
-    if any(w in text for w in _MAIN_CABIN_WORDS):
+    if any(w in text for w in _MAIN_CABIN_WORDS) or _ECO_WORD.search(text):
         return FareBrand.MAIN_CABIN, raw
-    fallback = {
-        "PREMIUM_ECONOMY": FareBrand.PREMIUM_ECONOMY,
-        "BUSINESS": FareBrand.BUSINESS,
-        "FIRST": FareBrand.FIRST,
-    }.get(cabin_u)
-    if fallback is not None:
-        return fallback, raw
+    if cabin_u == "PREMIUM_ECONOMY":
+        return FareBrand.PREMIUM_ECONOMY, raw
     return FareBrand.UNKNOWN, raw
 
 
@@ -136,6 +162,63 @@ def _amenity_is_free(details: dict[str, Any], word: str) -> bool | None:
         ):
             return True
     return None
+
+
+def _carry_on(details: dict[str, Any]) -> bool | None:
+    bags = details.get("includedCabinBags")
+    if isinstance(bags, dict) and bags.get("quantity") is not None:
+        return bags["quantity"] > 0
+    return None
+
+
+def _fare_summary(
+    offer: dict[str, Any],
+) -> tuple[FareBrand, str | None, bool | None, bool | None, bool | None]:
+    """(brand, raw, carry_on, changeable, refundable) as the WORST of every segment of every
+    traveler: a Basic Economy leg anywhere makes the whole offer Basic Economy.
+
+    Brand: any BASIC_ECONOMY segment -> BASIC_ECONOMY, else any UNKNOWN -> UNKNOWN, else the lowest
+    tier present (`_TIER_ORDER`); the raw label is the deciding segment's. Carry-on is True only if
+    every segment includes one, False if any segment is known to exclude it, else None.
+    Changeable/refundable are True only if every segment says so, else None.
+    """
+    carriers = {
+        str(seg.get("id")): seg.get("carrierCode")
+        for it in offer.get("itineraries") or []
+        for seg in it.get("segments") or []
+    }
+    rows: list[tuple[FareBrand, str | None, bool | None, bool, bool]] = []
+    for traveler in offer.get("travelerPricings") or []:
+        for details in traveler.get("fareDetailsBySegment") or []:
+            brand, raw = map_brand(
+                details.get("cabin"),
+                details.get("brandedFare"),
+                details.get("brandedFareLabel"),
+                carrier=carriers.get(str(details.get("segmentId"))),
+            )
+            rows.append(
+                (
+                    brand,
+                    raw,
+                    _carry_on(details),
+                    _amenity_is_free(details, "CHANGE") is True,
+                    _amenity_is_free(details, "REFUND") is True,
+                )
+            )
+    if not rows:
+        return FareBrand.UNKNOWN, None, None, None, None
+
+    deciding = next(
+        (r for r in rows if r[0] is FareBrand.BASIC_ECONOMY),
+        next((r for r in rows if r[0] is FareBrand.UNKNOWN), None),
+    )
+    if deciding is None:
+        deciding = min(rows, key=lambda r: _TIER_ORDER.index(r[0]))
+    carry = [r[2] for r in rows]
+    carry_on = False if False in carry else (None if None in carry else True)
+    changeable = True if all(r[3] for r in rows) else None
+    refundable = True if all(r[4] for r in rows) else None
+    return deciding[0], deciding[1], carry_on, changeable, refundable
 
 
 def _segment(seg: dict[str, Any], aircraft_names: dict[str, str]) -> Segment:
@@ -173,18 +256,7 @@ def _observation(
     price = offer["price"]
     price_cents = int(Decimal(str(price["grandTotal"])) * 100)
 
-    travelers = offer.get("travelerPricings") or []
-    by_segment = (travelers[0].get("fareDetailsBySegment") or []) if travelers else []
-    first = by_segment[0] if by_segment else {}
-    brand, brand_raw = map_brand(
-        first.get("cabin"), first.get("brandedFare"), first.get("brandedFareLabel")
-    )
-    cabin_bags = first.get("includedCabinBags")
-    carry_on = (
-        cabin_bags["quantity"] > 0
-        if isinstance(cabin_bags, dict) and cabin_bags.get("quantity") is not None
-        else None
-    )
+    brand, brand_raw, carry_on, changeable, refundable = _fare_summary(offer)
 
     return FareObservation(
         watchlist_id=target.watchlist_id,
@@ -197,8 +269,8 @@ def _observation(
         currency=price["currency"],
         fare_brand=brand,
         fare_brand_raw=brand_raw,
-        changeable=_amenity_is_free(first, "CHANGE"),
-        refundable=_amenity_is_free(first, "REFUND"),
+        changeable=changeable,
+        refundable=refundable,
         carry_on_included=carry_on,
         seats_remaining=offer.get("numberOfBookableSeats"),
         days_to_departure=target.days_to_departure(observed_at),
@@ -313,10 +385,12 @@ class AmadeusProvider:
                     "client_secret": self._client_secret,
                 },
             )
-        except httpx.TransportError as e:
+        except httpx.HTTPError as e:
+            # `from None`: the httpx request (form body with the client secret) must not ride along.
             raise self._fail(
-                f"amadeus token request failed: {type(e).__name__}", retryable=True
-            ) from e
+                f"amadeus token request failed: {type(e).__name__}",
+                retryable=isinstance(e, httpx.TransportError),
+            ) from None
         if resp.status_code != 200:
             raise self._fail(
                 f"amadeus token request failed: HTTP {resp.status_code}",
@@ -357,10 +431,14 @@ class AmadeusProvider:
                 params=params,
                 headers={"Authorization": f"Bearer {self._bearer()}"},
             )
-        except httpx.TimeoutException as e:
-            raise self._fail("amadeus search timed out", retryable=True) from e
-        except httpx.TransportError as e:
-            raise self._fail(f"amadeus search failed: {type(e).__name__}", retryable=True) from e
+        except httpx.TimeoutException:
+            raise self._fail("amadeus search timed out", retryable=True) from None
+        except httpx.HTTPError as e:
+            # `from None`: the httpx request (bearer token) must not ride along in a traceback.
+            raise self._fail(
+                f"amadeus search failed: {type(e).__name__}",
+                retryable=isinstance(e, httpx.TransportError),
+            ) from None
 
     def search(
         self,

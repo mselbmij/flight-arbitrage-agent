@@ -212,11 +212,56 @@ def test_no_brand_hint_and_no_filter_is_unknown():
     )
 
 
-def test_exclude_basic_in_payload_wins_over_extension_text():
+def test_basic_extension_wins_over_the_exclude_basic_echo():
+    """Evidence of Basic beats the trusted flag: the echo must never launder a Basic fare."""
     payload = copy.deepcopy(load("serpapi_no_basic_filter_with_basic_extension.json"))
     payload["search_parameters"]["exclude_basic"] = "true"
     res = run_parse(payload, allow_basic_wl())
+    by_price = {o.price_cents: o for o in res.observations}
+    assert by_price[12900].fare_brand is FareBrand.BASIC_ECONOMY  # itinerary-level extension
+    assert by_price[12900].fare_brand_raw == "Basic Economy"
+    assert by_price[13900].fare_brand is FareBrand.BASIC_ECONOMY  # segment-level, lowercase
+    assert by_price[13900].carry_on_included is None
+    # no extension + echo + US domestic: the echo is accepted
+    assert by_price[24900].fare_brand is FareBrand.MAIN_CABIN
+    assert by_price[24900].fare_brand_raw == "google:exclude_basic"
+
+
+def test_echo_without_extension_on_a_us_domestic_target_is_main_cabin():
+    res = run_parse(load("serpapi_sea_sjc_rt_exclude_basic.json"))
     assert {o.fare_brand for o in res.observations} == {FareBrand.MAIN_CABIN}
+    assert {o.carry_on_included for o in res.observations} == {True}
+
+
+def sea_lhr_oneway() -> ResolvedWatchlist:
+    w = Watchlist(id="sea-lhr-nov", origin="SEA", destination="LHR", depart=date(2026, 11, 25),
+                  ceiling_cents=90000)  # fmt: skip
+    return WatchlistFile(version=1, watchlists=[w]).resolved()[0]
+
+
+def test_echo_on_an_international_target_is_not_evidence():
+    res = run_parse(load("serpapi_sea_lhr_exclude_basic_echo.json"), sea_lhr_oneway())
+    clean = next(o for o in res.observations if o.price_cents == 81200)
+    assert (clean.fare_brand, clean.fare_brand_raw, clean.carry_on_included) == (
+        FareBrand.UNKNOWN,
+        None,
+        None,
+    )
+
+
+def test_basic_extension_on_an_international_target_with_the_echo_is_basic_economy():
+    res = run_parse(load("serpapi_sea_lhr_exclude_basic_echo.json"), sea_lhr_oneway())
+    basic = next(o for o in res.observations if o.price_cents == 64000)
+    assert (basic.fare_brand, basic.fare_brand_raw) == (FareBrand.BASIC_ECONOMY, "Basic Economy")
+
+
+def test_echo_needs_both_ends_to_be_us_airports():
+    payload = load("serpapi_sea_lhr_exclude_basic_echo.json")
+    wl = sea_lhr_oneway()
+    for origin, destination in [("LHR", "SEA"), ("SEA", "ZZZ"), ("ZZZ", "SEA")]:
+        target = wl.targets[0].model_copy(update={"origin": origin, "destination": destination})
+        res = run_parse(payload, wl, target)
+        assert res.observations[0].fare_brand is FareBrand.UNKNOWN, (origin, destination)
 
 
 # --------------------------------------------------------------------------- band
@@ -284,10 +329,30 @@ def test_zero_results_is_an_empty_list_not_an_error():
     assert res.observations == []
 
 
-def test_zero_results_still_returns_the_band():
-    res = run_parse(load("serpapi_zero_results.json"))
-    assert (res.band.lowest_price_cents, res.band.typical_low_cents) == (20500, 19000)
-    assert res.band.price_level.value == "high"
+def test_zero_results_fixture_has_the_live_shape():
+    """The live API says "no results" with status Success AND an error string."""
+    payload = load("serpapi_zero_results.json")
+    assert payload["search_metadata"]["status"] == "Success"
+    assert "hasn't returned any results" in payload["error"]
+    assert "best_flights" not in payload and "other_flights" not in payload
+
+
+def test_zero_results_without_price_insights_has_no_band():
+    assert run_parse(load("serpapi_zero_results.json")).band is None
+
+
+def test_zero_results_still_returns_the_band_when_price_insights_are_present():
+    payload = copy.deepcopy(load("serpapi_zero_results.json"))
+    payload["price_insights"] = load("serpapi_sea_sjc_rt_exclude_basic.json")["price_insights"]
+    res = run_parse(payload)
+    assert res.observations == []
+    assert (res.band.lowest_price_cents, res.band.typical_low_cents) == (17600, 19000)
+
+
+def test_zero_results_error_match_is_case_insensitive():
+    payload = copy.deepcopy(load("serpapi_zero_results.json"))
+    payload["error"] = "GOOGLE FLIGHTS HASN'T RETURNED ANY RESULTS FOR THIS QUERY."
+    assert run_parse(payload).observations == []
 
 
 def test_empty_flight_lists_are_treated_like_absent_ones():
@@ -304,12 +369,26 @@ def test_error_payload_raises_non_retryable_provider_error():
     assert "Invalid API key" in str(exc.value)
 
 
-def test_error_key_alone_raises_even_if_status_says_success():
+def test_any_other_error_string_raises_even_if_status_says_success():
     payload = copy.deepcopy(load("serpapi_zero_results.json"))
-    payload["error"] = "Google hasn't returned any results for this query."
+    payload["error"] = "Google Flights is temporarily unavailable."
     with pytest.raises(ProviderError) as exc:
         run_parse(payload)
     assert exc.value.retryable is False
+
+
+def test_no_results_error_next_to_actual_flights_is_still_an_error():
+    payload = copy.deepcopy(load("serpapi_sea_sjc_rt_exclude_basic.json"))
+    payload["error"] = "Google Flights hasn't returned any results for this query."
+    with pytest.raises(ProviderError):
+        run_parse(payload)
+
+
+def test_no_results_error_with_a_non_success_status_is_still_an_error():
+    payload = copy.deepcopy(load("serpapi_zero_results.json"))
+    payload["search_metadata"]["status"] = "Error"
+    with pytest.raises(ProviderError):
+        run_parse(payload)
 
 
 def test_non_success_status_without_error_key_raises():
@@ -368,3 +447,103 @@ def test_all_itineraries_unknown_airport_is_empty_not_an_error():
     res = run_parse(payload)
     assert res.observations == []
     assert res.raw["_skipped_unknown_airport"] == 1
+
+
+# --------------------------------------------------------------------------- invalid itineraries
+
+
+def test_itinerary_failing_model_validation_is_skipped_and_counted():
+    payload = copy.deepcopy(load("serpapi_sea_sjc_rt_exclude_basic.json"))
+    payload["best_flights"][0]["flights"][0]["flight_number"] = "AS 12345"  # 5 digits
+    res = run_parse(payload)
+    assert [o.price_cents for o in res.observations] == [23100, 19800, 17600]
+    assert res.raw["_skipped_invalid"] == 1
+
+
+def test_invalid_itinerary_skip_keeps_the_band():
+    payload = copy.deepcopy(load("serpapi_sea_sjc_rt_exclude_basic.json"))
+    payload["best_flights"][0]["flights"][0]["flight_number"] = "AS 12345"
+    assert run_parse(payload).band is not None
+
+
+def test_all_itineraries_invalid_is_empty_not_an_error():
+    payload = copy.deepcopy(load("serpapi_sea_sjc_rt_exclude_basic.json"))
+    for entry in [*payload["best_flights"], *payload["other_flights"]]:
+        entry["flights"][0]["flight_number"] = "AS 12345"
+    res = run_parse(payload)
+    assert res.observations == [] and res.raw["_skipped_invalid"] == 4
+
+
+def test_nothing_invalid_means_no_counter(rt):
+    assert "_skipped_invalid" not in rt.raw
+
+
+@pytest.mark.parametrize(
+    "best_flights",
+    [[{"price": 100}], [7], "nope"],
+    ids=["no-flights-key", "not-a-dict", "not-a-list"],
+)
+def test_payload_shape_failures_stay_provider_errors(best_flights):
+    payload = copy.deepcopy(load("serpapi_sea_sjc_rt_exclude_basic.json"))
+    payload["best_flights"] = best_flights
+    with pytest.raises(ProviderError) as exc:
+        run_parse(payload)
+    assert exc.value.retryable is False
+
+
+def test_missing_search_metadata_is_a_provider_error():
+    payload = copy.deepcopy(load("serpapi_sea_sjc_rt_exclude_basic.json"))
+    del payload["search_metadata"]
+    with pytest.raises(ProviderError):
+        run_parse(payload)
+
+
+def test_non_dict_payload_is_a_provider_error():
+    with pytest.raises(ProviderError):
+        run_parse(["not", "a", "dict"])
+
+
+# --------------------------------------------------------------------------- secrets in raw
+
+KEY = "SECRETKEY123"
+
+
+def test_api_key_is_scrubbed_from_raw_recursively():
+    payload = copy.deepcopy(load("serpapi_sea_sjc_rt_exclude_basic.json"))
+    payload["search_metadata"]["json_endpoint"] = (
+        f"https://serpapi.com/searches/abc.json?engine=google_flights&api_key={KEY}&hl=en"
+    )
+    payload["search_metadata"]["note"] = f"sent with {KEY} in the clear"
+    payload["best_flights"][0]["flights"][0]["extensions"].append(f"api_key={KEY}")
+    res = run_parse_with_key(payload)
+    dumped = json.dumps(res.raw)
+    assert KEY not in dumped
+    assert "api_key=REDACTED&hl=en" in res.raw["search_metadata"]["json_endpoint"]
+    assert res.raw["search_metadata"]["note"] == "sent with REDACTED in the clear"
+
+
+def test_api_key_fragment_is_scrubbed_even_when_the_literal_key_is_unknown():
+    payload = copy.deepcopy(load("serpapi_sea_sjc_rt_exclude_basic.json"))
+    payload["search_metadata"]["json_endpoint"] = f"https://serpapi.com/x.json?api_key={KEY}"
+    assert KEY not in json.dumps(run_parse(payload).raw)
+
+
+def test_scrubbing_does_not_mutate_the_callers_payload():
+    payload = copy.deepcopy(load("serpapi_sea_sjc_rt_exclude_basic.json"))
+    payload["search_metadata"]["json_endpoint"] = f"https://serpapi.com/x.json?api_key={KEY}"
+    run_parse_with_key(payload)
+    assert KEY in payload["search_metadata"]["json_endpoint"]
+
+
+def run_parse_with_key(payload):
+    wl = thanksgiving()
+    return parse(
+        payload, target=wl.targets[0], watchlist=wl, run_id=RUN, observed_at=T0, api_key=KEY
+    )
+
+
+def test_days_to_departure_is_the_targets_own_calculation():
+    wl = thanksgiving()
+    res = run_parse(load("serpapi_sea_sjc_rt_exclude_basic.json"), wl)
+    expected = wl.targets[0].days_to_departure(T0)
+    assert {o.days_to_departure for o in res.observations} == {expected}

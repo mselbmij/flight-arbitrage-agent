@@ -77,6 +77,9 @@ Request (`GET {base_url}/search`), one call per target:
 | `currency` | `wl.currency` |
 | `hl` / `gl` | `en` / `us` |
 | `stops` | `max_stops` 0→`1`, 1→`2`, 2→`3`, else omit |
+| `layover_duration` | `"30,{max_layover_minutes}"` when `max_stops > 0`; omit for nonstop-only |
+| `outbound_times` | `"{dep_from},23,0,{arr_to}"` (whole hours, rounded inward): `dep_from = ceil(earliest_departure_local to the hour)` (06:00→6, 06:30→7, clamped to 23), `arr_to = hour of latest_arrival_local` (23:30→23, 22:00→22) |
+| `return_times` | same value as `outbound_times`, round trips only |
 | `exclude_basic` | `true` when `not allow_basic_economy and cabin is ECONOMY` (US-only feature; we are `gl=us`) |
 | `include_airlines` | `",".join(allowed_carriers)` when non-empty (never with exclude) |
 | `exclude_airlines` | `",".join(excluded_carriers)` when non-empty and allowed is empty |
@@ -101,15 +104,16 @@ price_insights? { lowest_price, price_level: "low"|"typical"|"high", typical_pri
 ```
 
 Parsing rules:
-* Zero results (`best_flights` and `other_flights` both absent/empty, status Success) → `observations=[]`, band from `price_insights` if present. Not an error.
-* `status != "Success"` or `error` key or HTTP ≠ 200 → `ProviderError(SERPAPI, msg, status_code=…, retryable = status in {429, 5xx} or timeout)`.
+* Zero results: the LIVE API answers HTTP 200, `search_metadata.status == "Success"`, no `best_flights`/`other_flights`, AND an `error` string such as `"Google Flights hasn't returned any results for this query."`. Success + no flight lists + an `error` containing `"hasn't returned any results"` (case-insensitive) → `observations=[]`, band from `price_insights` if present. Not an error. `serpapi_zero_results.json` copies this shape. Any other `error` string is still a `ProviderError`.
+* `status != "Success"` or any other `error` key or HTTP ≠ 200 → `ProviderError(SERPAPI, msg, status_code=…, retryable = status in {429, 5xx} or timeout)`.
 * **Round trips: the response holds OUTBOUND legs only** (return legs cost a second call via `departure_token`, which we do not spend). The observation's `Itinerary` has one slice (outbound) and `price_cents` is the round-trip total. This is documented in ARCHITECTURE §5 (orchestrator adds it). `raw["_note"] = "outbound_only"` for RT.
-* Segment: `carrier` = first token of `flight_number` (`"AS 1234"` → `AS`, `"1234"`); `departure_local = localize(parse("%Y-%m-%d %H:%M"), departure_airport.id)`; same for arrival. `aircraft = airplane`. `UnknownAirportError` for any segment → skip that itinerary, count it in `raw["_skipped_unknown_airport"]`, continue.
+* Segment: `carrier` = first token of `flight_number` (`"AS 1234"` → `AS`, `"1234"`); `departure_local = localize(parse("%Y-%m-%d %H:%M"), departure_airport.id)`; same for arrival. `aircraft = airplane`. `UnknownAirportError` for any segment → skip that itinerary, count it in `raw["_skipped_unknown_airport"]`, continue. An itinerary that fails `Segment`/`Itinerary`/`FareObservation` model validation (e.g. a 5-digit flight number) is skipped the same way and counted in `raw["_skipped_invalid"]`; the call's band is kept. Whole-payload shape failures (missing `search_metadata`, non-dict body, an entry with no `flights`, an unparseable time or price) stay `ProviderError`.
 * `price_cents = price * 100` (integer arithmetic; if `price` is a float with cents, `round(price*100)`). Currency from `search_parameters.currency`, default `wl.currency`.
-* Brand: if `exclude_basic` was sent (`search_parameters.exclude_basic == "true"` or our params say so) → `fare_brand=MAIN_CABIN`, `fare_brand_raw="google:exclude_basic"`, `carry_on_included=True`. Else: any itinerary- or segment-level extension containing `"Basic"` (case-insensitive) → `BASIC_ECONOMY` with that string as raw; otherwise `UNKNOWN`, `fare_brand_raw=None`, `carry_on_included=None`.
+* Brand, in this order: (1) any itinerary- or segment-level extension containing `"basic"` (case-insensitive) → `BASIC_ECONOMY` with that string as raw, `carry_on_included=None`, ALWAYS, whatever the `exclude_basic` echo says. (2) Else, if the payload echoes `search_parameters.exclude_basic == "true"` AND both `target.origin` and `target.destination` are US airports (`airports.is_us`; unknown code → False) → `MAIN_CABIN`, `fare_brand_raw="google:exclude_basic"`, `carry_on_included=True`. (3) Else `UNKNOWN`, `fare_brand_raw=None`, `carry_on_included=None`. The echo is not evidence on international itineraries.
+* `parse(..., api_key=None)` scrubs `api_key=<value>` fragments and the literal key from every string in `raw` (recursively) before returning; `search_metadata.json_endpoint` carries the key.
 * `changeable`/`refundable`/`seats_remaining` = None (not provided).
 * `booking_url = search_metadata.google_flights_url`.
-* `risk = None` always (engine's job). `watchlist_id`/`target_id` from the target. `days_to_departure = (target.depart - observed_at.date()).days`.
+* `risk = None` always (engine's job). `watchlist_id`/`target_id` from the target. `days_to_departure = target.days_to_departure(observed_at)`.
 * Band: `BenchmarkBand(lowest_price_cents=lowest_price*100, typical_low_cents=range[0]*100, typical_high_cents=range[1]*100, price_level=PriceLevel(price_level) or UNKNOWN)`; `None` when `price_insights` absent.
 * `raw` = the full payload (runner writes it to `data/raw/`).
 
@@ -117,7 +121,8 @@ Fixtures (tester builds from the shape above; no live key exists):
 * `serpapi_sea_sjc_rt_exclude_basic.json` — Thanksgiving target; `best_flights` 2 entries (AS nonstop 07:15→09:25, DL one-stop via SLC with a 95-min layover), `other_flights` 2 (AS 05:40 departure → `departs_before_06:00`; UA one-stop via SFO with a 14h overnight layover → `layover>180` + `overnight_layover`); `price_insights` present; `search_parameters.exclude_basic: "true"`.
 * `serpapi_sea_jfk_coterminal.json` — one-way; one itinerary arrives EWR, next segment departs JFK → `coterminal_swap`.
 * `serpapi_no_basic_filter_with_basic_extension.json` — `exclude_basic` absent; one entry has extension `"Basic Economy"` → BASIC_ECONOMY; another has no brand hint → UNKNOWN.
-* `serpapi_zero_results.json` — Success, no flights, with `price_insights`.
+* `serpapi_zero_results.json` — the live shape: status Success, no flight lists, `error: "Google Flights hasn't returned any results for this query."`, no `price_insights`.
+* `serpapi_sea_lhr_exclude_basic_echo.json` — one-way SEA→LHR with the `exclude_basic` echo: one clean entry (UNKNOWN: echo is not evidence internationally) and one "Basic Economy" extension (BASIC_ECONOMY despite the echo).
 * `serpapi_error.json` — `search_metadata.status: "Error"`, `error: "..."`.
 * `serpapi_unknown_airport.json` — one itinerary via code `ZZZ` → skipped, others parsed.
 
@@ -132,7 +137,7 @@ class AmadeusProvider:
     # provider on every observation/band is MOCK when host == "test" (ARCHITECTURE §5)
 def build_params(target, watchlist) -> dict[str, str]
 def parse(payload: dict, *, target, watchlist, run_id, observed_at, provider: Provider) -> ProviderResult
-def map_brand(cabin: str | None, branded_fare: str | None, branded_fare_label: str | None) -> tuple[FareBrand, str | None]
+def map_brand(cabin, branded_fare, branded_fare_label, *, carrier: str | None = None) -> tuple[FareBrand, str | None]  # one segment
 ```
 
 Hosts: test `https://test.api.amadeus.com`, production `https://api.amadeus.com`.
@@ -169,16 +174,19 @@ Parsing rules:
 * Segment: `carrier=carrierCode`, `operating_carrier=operating.carrierCode` if present, `flight_number=number`,
   `aircraft=dictionaries.aircraft.get(aircraft.code, aircraft.code)`, times `localize(fromisoformat(at), iataCode)`.
   `UnknownAirportError` → skip offer, count in `raw["_skipped_unknown_airport"]`.
-* Brand from `travelerPricings[0].fareDetailsBySegment[0]` via `map_brand`; `fare_brand_raw` = `brandedFareLabel or brandedFare or None`:
-  - any of (brandedFare, label) upper-contains `"BASIC"` → `BASIC_ECONOMY`
+* Brand is the WORST across ALL `travelerPricings[*].fareDetailsBySegment[*]` (one `map_brand` call per segment, passing that segment's `carrierCode`, looked up by `segmentId`): any segment `BASIC_ECONOMY` → `BASIC_ECONOMY`; else any segment `UNKNOWN` → `UNKNOWN`; else the lowest tier present in the order `MAIN_CABIN < MAIN_PLUS < PREMIUM_ECONOMY < BUSINESS < FIRST`. `fare_brand_raw` is the deciding segment's `brandedFareLabel or brandedFare or None`. No fare details at all → `UNKNOWN`. `map_brand` rules, in order (upper-cased `brandedFare` + label; a field that is exactly a cabin name — `ECONOMY`, `PREMIUM ECONOMY`, `BUSINESS`, `FIRST` — is not brand evidence and is ignored):
+  - contains `"BASIC"` → `BASIC_ECONOMY`
+  - cabin BUSINESS / FIRST → that cabin (beats every economy-family keyword: "BUSINESS SAVER", "BUSINESS FLEX" → `BUSINESS`)
+  - contains `LIGHT` → `BASIC_ECONOMY` (any carrier)
+  - contains `SAVER` → `BASIC_ECONOMY` if `carrier == "AS"`, else `UNKNOWN` (raw kept); never `MAIN_CABIN`
   - contains `"PREMIUM"` and cabin ECONOMY/PREMIUM_ECONOMY → `PREMIUM_ECONOMY`
   - contains any of `COMFORT`, `PLUS`, `PREFERRED`, `EXTRA`, `FLEX` → `MAIN_PLUS`
-  - contains any of `MAIN`, `STANDARD`, `CLASSIC`, `SAVER`, `ECO`, `LIGHT` → `MAIN_CABIN`
-  - cabin BUSINESS → `BUSINESS`; cabin FIRST → `FIRST`
-  - both brand fields missing → `UNKNOWN` (raw None)
+  - contains any of `MAIN`, `STANDARD`, `CLASSIC`, or the whole word `ECO` (`\bECO\b`, so "ECONOMY" does not match) → `MAIN_CABIN`
+  - cabin PREMIUM_ECONOMY → `PREMIUM_ECONOMY`
+  - otherwise `UNKNOWN` (raw kept, so mapping fixes can be made from the DB)
   Tests pin every branch; the table is expected to grow as `fare_brand_raw` values show up in the DB.
-* `carry_on_included`: `includedCabinBags.quantity > 0` if present, else None. `seats_remaining = numberOfBookableSeats`.
-* `changeable` / `refundable`: from `amenities` with `amenityType == "BRANDED_FARES"` whose description upper-contains `CHANGE` / `REFUND`: `True` if `isChargeable is False`, else `None` (chargeable changes are not "changeable" for credit harvesting purposes… leave None, don't guess). Absent → None.
+* `carry_on_included`, aggregated over every segment: `includedCabinBags.quantity > 0` per segment; False if any segment is known to have no carry-on, else None if any segment is silent, else True. `seats_remaining = numberOfBookableSeats`.
+* `changeable` / `refundable`, aggregated over every segment: per segment, from `amenities` with `amenityType == "BRANDED_FARES"` whose description upper-contains `CHANGE` / `REFUND` and `isChargeable is False`; the offer is `True` only if EVERY segment is, else `None` (chargeable or absent → None; don't guess).
 * `booking_url = None` (Amadeus is not a booking link). `risk=None`.
 * Band: Amadeus has no typical-price band → `None`.
 * Empty `data` → `observations=[]`, not an error. `errors[]` key or HTTP ≠ 200 → `ProviderError`.
@@ -186,7 +194,7 @@ Parsing rules:
 Fixtures: `spec_example_syd_bkk.json` (exists; two PR offers, bags by weight), plus tester-built
 `amadeus_sea_sjc_branded.json` with four offers covering BASIC / MAIN / COMFORT+ / UNKNOWN brands,
 `includedCabinBags`, a chargeable CHANGE amenity, `numberOfBookableSeats`, and one offer with an
-unknown airport code; `amadeus_token.json` `{access_token, token_type, expires_in: 1799}`;
+unknown airport code; `amadeus_mixed_brand.json` (seven round-trip offers where segment 1 and a later segment/traveler disagree: Main/Basic, Main/no-brand, Comfort+/Main, two travelers, AS Saver, DL Saver, silent carry-on bag count); `amadeus_token.json` `{access_token, token_type, expires_in: 1799}`;
 `amadeus_error_400.json` `{"errors":[{"status":400,"code":477,"title":"INVALID FORMAT","detail":"..."}]}`.
 Auth tests use `respx` to assert the token endpoint is hit once across two searches, and again after expiry.
 

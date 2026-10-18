@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from functools import lru_cache
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import airportsdata
 
@@ -29,7 +29,18 @@ def tz_for(iata: str) -> ZoneInfo:
     row = _table().get(iata.upper())
     if row is None or not row.get("tz"):
         raise UnknownAirportError(iata)
-    return ZoneInfo(row["tz"])
+    try:
+        return ZoneInfo(row["tz"])
+    except (
+        ZoneInfoNotFoundError
+    ):  # a KeyError subclass: the tz name is on record but not on this host
+        raise UnknownAirportError(iata) from None
+
+
+def is_us(iata: str) -> bool:
+    """True when `iata` is a known US airport; an unknown code is False."""
+    row = _table().get(iata.upper())
+    return row is not None and row.get("country") == "US"
 
 
 def localize(naive: datetime, iata: str) -> datetime:

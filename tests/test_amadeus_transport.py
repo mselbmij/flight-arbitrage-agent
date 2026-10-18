@@ -346,3 +346,50 @@ def test_error_messages_never_contain_credentials_or_tokens(router, clock):
         search(make(clock))
     msg = str(exc.value)
     assert SECRET not in msg and "tok-leak-check" not in msg
+
+
+# --------------------------------------------------------------------------- non-transport httpx errors
+
+
+def _decoding_error() -> httpx.DecodingError:
+    return httpx.DecodingError(
+        "bad gzip", request=httpx.Request("POST", f"{TEST_HOST}{TOKEN_PATH}")
+    )
+
+
+def test_decoding_error_on_search_is_a_non_retryable_provider_error(router, clock):
+    routes(router, search=[_decoding_error()])
+    with pytest.raises(ProviderError) as exc:
+        search(make(clock))
+    assert exc.value.retryable is False
+    assert exc.value.provider is Provider.MOCK
+
+
+def test_decoding_error_on_token_request_is_a_non_retryable_provider_error(router, clock):
+    tok = router.post(f"{TEST_HOST}{TOKEN_PATH}").mock(side_effect=_decoding_error())
+    srch = router.get(f"{TEST_HOST}{SEARCH_PATH}").mock(return_value=httpx.Response(200, json={}))
+    with pytest.raises(ProviderError) as exc:
+        search(make(clock))
+    assert exc.value.retryable is False
+    assert (tok.call_count, srch.call_count) == (1, 0)
+
+
+@pytest.mark.parametrize("where", ["token", "search"])
+def test_httpx_errors_do_not_chain_the_request_into_the_provider_error(router, clock, where):
+    """The httpx exception carries the request: the form-encoded client secret or the bearer token."""
+    if where == "token":
+        router.post(f"{TEST_HOST}{TOKEN_PATH}").mock(side_effect=httpx.ConnectError("down"))
+    else:
+        routes(router, search=[httpx.ConnectError("down")])
+    with pytest.raises(ProviderError) as exc:
+        search(make(clock))
+    assert exc.value.__cause__ is None
+    assert exc.value.__suppress_context__ is True
+    assert exc.value.retryable is True  # a refused connection is a TransportError
+
+
+def test_token_request_timeout_is_still_retryable(router, clock):
+    router.post(f"{TEST_HOST}{TOKEN_PATH}").mock(side_effect=httpx.ConnectTimeout("slow"))
+    with pytest.raises(ProviderError) as exc:
+        search(make(clock))
+    assert exc.value.retryable is True

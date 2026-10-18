@@ -20,26 +20,5 @@
     "currency": "USD",
     "exclude_basic": "true"
   },
-  "price_insights": {
-    "lowest_price": 205,
-    "price_level": "high",
-    "typical_price_range": [
-      190,
-      260
-    ],
-    "price_history": [
-      [
-        1760000000,
-        230
-      ],
-      [
-        1760086400,
-        221
-      ],
-      [
-        1760172800,
-        214
-      ]
-    ]
-  }
+  "error": "Google Flights hasn't returned any results for this query."
 }
