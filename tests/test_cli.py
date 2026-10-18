@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -10,6 +11,7 @@ from freezegun import freeze_time
 from typer.testing import CliRunner
 
 from src.db import Database
+from src.ingestion.mock_client import MockProvider
 from src.models import WatchlistFile
 from src.runner.cli import app
 from tests.conftest import REPO, make_alert, make_obs, make_run
@@ -440,3 +442,264 @@ def test_seed_on_the_shipped_config_gives_every_target_a_trap_and_a_dip(tmp_path
                 be = [o for o in obs if o.fare_brand.value == "basic_economy"]
                 assert len(be) == 1, t.target_id
                 assert be[0].risk is not None and be[0].risk.passed is False
+
+
+# --------------------------------------------------------------------------- #
+# poll (phase 5): `fares poll` end to end on the mock provider
+# --------------------------------------------------------------------------- #
+
+FX = REPO / "tests" / "fixtures" / "mock"
+THANKS = "sea-sjc-thanksgiving:SEASJC:2026-11-25:2026-11-29"
+POLL_YAML = """
+version: 1
+watchlists:
+  - id: sea-sjc-thanksgiving
+    origin: SEA
+    destination: SJC
+    depart: 2026-11-25
+    return: 2026-11-29
+    ceiling_cents: 32000
+    poll: {providers: [serpapi], targets_per_run: 1}
+"""
+TWO_TARGET_YAML = """
+version: 1
+watchlists:
+  - id: sea-sjc-thanksgiving
+    origin: SEA
+    destination: [SJC, SFO]
+    depart: 2026-11-25
+    return: 2026-11-29
+    ceiling_cents: 32000
+    poll: {providers: [serpapi], targets_per_run: 2}
+"""
+
+
+@pytest.fixture
+def poll_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """No provider credentials, roomy limits, and a FARES_DB_PATH that is a tmp 'live' file."""
+    live = tmp_path / "live.db"
+    monkeypatch.setenv("FARES_DB_PATH", str(live))
+    monkeypatch.setenv("MAX_CALLS_PER_RUN", "10")
+    monkeypatch.setenv("MAX_DAILY_API_CALLS", "100")
+    for var in ("SERPAPI_KEY", "AMADEUS_CLIENT_ID", "AMADEUS_CLIENT_SECRET", "AMADEUS_HOST"):
+        monkeypatch.delenv(var, raising=False)
+    return live
+
+
+def poll_args(tmp_path: Path, cfg_text: str = POLL_YAML) -> tuple[list[str], Path]:
+    dbp = tmp_path / "scratch.db"
+    args = [
+        "poll",
+        "--db", str(dbp),
+        "--config", str(write(tmp_path, cfg_text)),
+        "--raw-dir", str(tmp_path / "raw"),
+        "--provider-override", "mock",
+        "--fixtures", str(FX),
+    ]  # fmt: skip
+    return args, dbp
+
+
+def rows(dbp: Path, sql: str) -> list[dict]:
+    with Database(dbp) as d:
+        return [dict(r) for r in d.con.execute(sql)]
+
+
+@freeze_time(NOW)
+def test_poll_override_mock_runs_end_to_end_and_exits_0(tmp_path: Path, poll_env: Path):
+    args, dbp = poll_args(tmp_path)
+    res = runner.invoke(app, args)
+    assert res.exit_code == 0, res.output
+    [run] = rows(dbp, "SELECT * FROM runs")
+    assert run["status"] == "ok" and run["calls_made"] == 1 and run["finished_at"] is not None
+    [call] = rows(dbp, "SELECT * FROM api_calls")
+    assert (call["provider"], call["status"], call["target_id"]) == ("mock", "ok", THANKS)
+    assert len(rows(dbp, "SELECT * FROM observations")) == 3
+    assert len(rows(dbp, "SELECT * FROM benchmark_bands")) == 1
+    [alert] = rows(dbp, "SELECT * FROM alerts")
+    # AS 327 31800 and DL via SLC 26900 are clean; the 22900 Basic Economy trap is rejected
+    assert (alert["kind"], alert["price_cents"]) == ("buy", 26900)
+    assert alert["delivered_at"] is None  # phase 5 ships the NullNotifier: undelivered, not lost
+
+
+@freeze_time(NOW)
+def test_poll_prints_run_id_status_counts_and_a_line_per_target(tmp_path: Path, poll_env: Path):
+    args, dbp = poll_args(tmp_path)
+    res = runner.invoke(app, args, env=WIDE)
+    assert res.exit_code == 0, res.output
+    [run] = rows(dbp, "SELECT run_id FROM runs")
+    out = res.output
+    assert run["run_id"] in out
+    assert re.search(r"\bok\b", out)
+    assert re.search(r"calls\D{0,12}1\b", out), out
+    assert re.search(r"observations\D{0,12}3\b", out), out
+    assert re.search(r"alerts\D{0,12}1\b", out), out
+    assert THANKS in out
+
+
+@freeze_time(NOW)
+def test_poll_trigger_defaults_to_manual_and_cron_is_recorded(tmp_path: Path, poll_env: Path):
+    args, dbp = poll_args(tmp_path)
+    assert runner.invoke(app, args).exit_code == 0
+    assert rows(dbp, 'SELECT "trigger" AS t FROM runs') == [{"t": "manual"}]
+
+    (tmp_path / "second").mkdir()
+    args2, dbp2 = poll_args(tmp_path / "second")
+    res = runner.invoke(app, [*args2, "--trigger", "cron"])
+    assert res.exit_code == 0, res.output
+    assert rows(dbp2, 'SELECT "trigger" AS t FROM runs') == [{"t": "cron"}]
+
+
+def test_poll_rejects_an_unknown_trigger_and_writes_nothing(tmp_path: Path, poll_env: Path):
+    args, dbp = poll_args(tmp_path)
+    res = runner.invoke(app, [*args, "--trigger", "weekly"])
+    assert res.exit_code != 0
+    assert not dbp.exists() or rows(dbp, "SELECT * FROM runs") == []
+
+
+@freeze_time(NOW)
+def test_poll_writes_raw_payloads_under_raw_dir_run_id_provider_target(
+    tmp_path: Path, poll_env: Path
+):
+    args, dbp = poll_args(tmp_path)
+    assert runner.invoke(app, args).exit_code == 0
+    [run] = rows(dbp, "SELECT run_id FROM runs")
+    raw = tmp_path / "raw" / run["run_id"] / f"mock-{THANKS.replace(':', '_')}.json"
+    assert raw.is_file()
+    refs = rows(dbp, "SELECT DISTINCT raw_payload_ref AS r FROM observations")
+    assert refs == [{"r": str(Path(run["run_id"]) / raw.name)}]
+
+
+@freeze_time(NOW)
+def test_poll_raw_dir_defaults_to_data_raw_under_the_working_directory(
+    tmp_path: Path, poll_env: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.chdir(tmp_path)
+    args, dbp = poll_args(tmp_path)
+    i = args.index("--raw-dir")
+    del args[i : i + 2]
+    assert runner.invoke(app, args).exit_code == 0
+    [run] = rows(dbp, "SELECT run_id FROM runs")
+    assert (tmp_path / "data" / "raw" / run["run_id"]).is_dir()
+
+
+@freeze_time(NOW)
+def test_poll_works_on_the_shipped_config_and_the_shipped_mock_fixture(
+    tmp_path: Path, poll_env: Path
+):
+    """The documented invocation. Watchlists without a fixture are PROVIDER_ERRORs, not a crash."""
+    dbp = tmp_path / "scratch.db"
+    res = runner.invoke(
+        app,
+        [
+            "poll", "--db", str(dbp), "--config", str(REPO / "config" / "watchlists.yaml"),
+            "--provider-override", "mock", "--fixtures", str(FX),
+            "--raw-dir", str(tmp_path / "raw"),
+        ],
+    )  # fmt: skip
+    assert res.exit_code == 0, res.output
+    [run] = rows(dbp, "SELECT * FROM runs")
+    assert run["status"] == "ok"
+    assert len(rows(dbp, f"SELECT * FROM observations WHERE target_id='{THANKS}'")) == 3
+    errors = rows(dbp, "SELECT * FROM alerts WHERE kind='provider_error'")
+    assert {e["watchlist_id"] for e in errors} <= {"sea-bayarea-jan-flex"}
+
+
+# -- the live database is off limits under --provider-override -------------------------------
+
+
+def test_poll_override_refuses_an_explicit_live_db_without_allow_live_db(
+    tmp_path: Path, poll_env: Path
+):
+    args, _ = poll_args(tmp_path)
+    args[args.index("--db") + 1] = str(poll_env)
+    res = runner.invoke(app, args)
+    assert res.exit_code == 1
+    assert "--allow-live-db" in res.output
+    assert not poll_env.exists()  # nothing created, let alone written
+
+
+def test_poll_override_refuses_the_default_db_when_it_is_the_live_one(
+    tmp_path: Path, poll_env: Path
+):
+    args, _ = poll_args(tmp_path)
+    i = args.index("--db")
+    del args[i : i + 2]  # fall back to $FARES_DB_PATH
+    res = runner.invoke(app, args)
+    assert res.exit_code == 1
+    assert "--allow-live-db" in res.output
+    assert not poll_env.exists()
+
+
+def test_poll_override_live_db_check_compares_resolved_paths(tmp_path: Path, poll_env: Path):
+    (tmp_path / "sub").mkdir()
+    args, _ = poll_args(tmp_path)
+    args[args.index("--db") + 1] = str(tmp_path / "sub" / ".." / "live.db")
+    assert runner.invoke(app, args).exit_code == 1
+    assert not poll_env.exists()
+
+
+@freeze_time(NOW)
+def test_poll_override_on_the_live_db_proceeds_with_allow_live_db(tmp_path: Path, poll_env: Path):
+    args, _ = poll_args(tmp_path)
+    args[args.index("--db") + 1] = str(poll_env)
+    res = runner.invoke(app, [*args, "--allow-live-db"])
+    assert res.exit_code == 0, res.output
+    assert len(rows(poll_env, "SELECT * FROM runs")) == 1
+
+
+def test_poll_override_without_fixtures_is_a_usage_error(tmp_path: Path, poll_env: Path):
+    args, dbp = poll_args(tmp_path)
+    i = args.index("--fixtures")
+    del args[i : i + 2]
+    res = runner.invoke(app, args)
+    assert res.exit_code != 0
+    assert not dbp.exists() or rows(dbp, "SELECT * FROM runs") == []
+
+
+# -- exit codes ----------------------------------------------------------------------------------
+
+
+@freeze_time(NOW)
+def test_poll_exits_2_when_the_breaker_trips(
+    tmp_path: Path, poll_env: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setenv("MAX_CALLS_PER_RUN", "1")
+    args, dbp = poll_args(tmp_path, TWO_TARGET_YAML)
+    res = runner.invoke(app, args)
+    assert res.exit_code == 2, res.output
+    assert "budget_tripped" in res.output
+    [run] = rows(dbp, "SELECT * FROM runs")
+    assert run["status"] == "budget_tripped" and run["calls_made"] == 1
+    assert len(rows(dbp, "SELECT * FROM alerts WHERE kind='budget_tripped'")) == 1
+    assert [r["status"] for r in rows(dbp, "SELECT status FROM api_calls ORDER BY id")] == [
+        "ok",
+        "skipped_breaker",
+    ]
+
+
+@freeze_time(NOW)
+def test_poll_daily_limit_comes_from_the_environment(
+    tmp_path: Path, poll_env: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setenv("MAX_DAILY_API_CALLS", "1")
+    args, dbp = poll_args(tmp_path, TWO_TARGET_YAML)
+    res = runner.invoke(app, args)
+    assert res.exit_code == 2, res.output
+    [tripped] = rows(dbp, "SELECT message FROM alerts WHERE kind='budget_tripped'")
+    assert tripped["message"] == "API budget tripped (1/1 day)"
+
+
+@freeze_time(NOW)
+def test_poll_exits_1_and_marks_the_run_errored_on_a_bug(
+    tmp_path: Path, poll_env: Path, monkeypatch: pytest.MonkeyPatch
+):
+    def boom(self, target, watchlist, run_id, observed_at):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(MockProvider, "search", boom)
+    args, dbp = poll_args(tmp_path)
+    res = runner.invoke(app, args)
+    assert res.exit_code == 1
+    [run] = rows(dbp, "SELECT * FROM runs")
+    assert run["status"] == "error" and "boom" in run["error"]
+    assert rows(dbp, "SELECT * FROM alerts") == []  # a bug is not a PROVIDER_ERROR

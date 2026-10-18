@@ -47,14 +47,20 @@ Rules (§3), in this order; at most ONE price-driven alert per call:
 4. **Strike** (MONITOR / PRIME / FENCE / LATE): candidates = observations with `risk.passed` and
    NOT (`risk.brand_unverified and fare_brand_raw is None`). `ref, mult, name = strike_reference(...)`.
    A candidate qualifies if `price_cents <= wl.ceiling_cents` OR (`ref is not None and price_cents <= ref * mult`,
-   integer compare: `price_cents * 100 <= ref * int(mult * 100)` — no float money). Pick the cheapest
+   exact compare: `price_cents * 100 <= ref * round(mult * 100)` — `int()` truncates 1.15×100 to 114 and
+   must not be used; equivalently `Decimal(str(mult))`). Pick the cheapest
    qualifying candidate. Kind: `EXTREME_LOW` in MONITOR, `BUY` otherwise. `reference_cents` = the
    bound that was hit: `wl.ceiling_cents` if that was the satisfied test (prefer the band test when
    both hold — the band is the informative one; report `ref` then).
 5. Message prefixes, in this order, space-separated, each only if applicable:
    `[brand unverified]` when `risk.brand_unverified`; `[return not checked]` when `risk.inbound_unverified`.
 6. `alert_key` (§3): `f"{target.target_id}:{kind.value}:{itinerary_key or '-'}:{price_cents // 1000 if price_cents else 0}"`.
-   `BUDGET_TRIPPED` / `PROVIDER_ERROR` are not produced here (runner) and use `watchlist_id` for the first field.
+   `BUDGET_TRIPPED` / `PROVIDER_ERROR` are produced by the runner: `f"{watchlist_id}:budget_tripped:-:0"` and
+   `f"{watchlist_id}:provider_error:{target_id}:0"` (target-specific so two failing targets don't mask each other).
+7. Prefixes go at the start of the title line. `strike_reference` returns the name in snake case
+   (`typical_low`); the message body renders it with a hyphen (`typical-low`).
+8. A purchased watchlist whose target has departed (`target.depart < now.date()`) gets no alerts and is
+   not selected for polling.
 
 Message text (§7a), title + body; the notifier (Phase 6) splits on the first newline:
 ```
@@ -96,12 +102,17 @@ def run_poll(db: Database, wf: WatchlistFile, providers: ProviderRegistry, *, li
    c. Success → `complete_api_call(call_id, OK, latency_ms)`. Write `result.raw` to
       `raw_dir / run_id / f"{provider}-{target_id.replace(':', '_')}.json"` (mkdir -p); set
       `raw_payload_ref` on each observation to that path relative to `raw_dir`.
-   d. `state = TargetState(band=db.latest_band(target_id), lowest_seen_cents=db.lowest_seen(target_id), already_alerted=kinds from db)` — read BEFORE inserting this run's rows (`lowest_seen` must not include them).
-   e. `obs = risk_filters.apply(result.observations, wl, config_hash=...)`; `ids = db.insert_observations(obs)`;
-      set `.id` on each (model_copy); `db.insert_band(result.band)` if present.
-   f. `alerts = rules.evaluate(wl, target, obs_with_ids, state, now=t0, run_id, config_hash)`; for each:
-      `aid = db.insert_alert(a, dedup_window_hours=24)`; if `aid` is not None → `channel = notifier.send(a)`;
-      if channel → `db.mark_delivered(aid, channel)`.
+   d. `obs = risk_filters.apply(result.observations, wl, config_hash=...)`; `ids = db.insert_observations(obs)`;
+      set `.id` on each (model_copy); `db.insert_band(result.band)` if present. Collect `obs_with_ids` and
+      `result.band` per target across providers.
+   Then ONCE per target, after all its providers (a `ProviderError` on one provider does not stop evaluation
+   of the others' rows):
+   e. `state = TargetState(band=this run's band if any provider returned one (the latest), else db.latest_band(target_id);
+      lowest_seen_cents=<read BEFORE step d for this target — this run's rows must not be included>;
+      already_alerted=db.alert_kinds_for(target_id))`.
+   f. `alerts = rules.evaluate(wl, target, all obs_with_ids for the target, state, now=t0_first_call, run_id, config_hash)`;
+      for each: `aid = db.insert_alert(a, dedup_window_hours=24)`; if `aid` is not None → `channel = notifier.send(a)`;
+      if channel → `db.mark_delivered(aid, channel)`. One price alert per target per run (§3).
 3. `finish_run(status="ok")`. Return the `Run` (re-read via `get_run`).
 
 `Database` needs one new read: `alert_kinds_for(target_id) -> set[AlertKind]` (distinct kinds where
