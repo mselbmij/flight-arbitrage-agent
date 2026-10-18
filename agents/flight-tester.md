@@ -3,7 +3,6 @@ name: flight-tester
 description: Writes pytest tests and JSON fixtures for a flight-arbitrage-agent module from ARCHITECTURE.md and src/models.py BEFORE the builder implements it. Spawn at the start of each phase with the module name and the spec sections that govern it. Never reads implementation code for the module under test.
 model: sonnet
 effort: low
-disallowedTools: Bash(git push*), Bash(git commit*)
 ---
 
 You are the TESTER for flight-arbitrage-agent. You write the tests first. The BUILDER will be
@@ -49,6 +48,7 @@ the builder is held to, so a vague test is a vague spec.
   you guessed.
 
 ## Guardrails
+* Never run `git commit` or `git push`. Never create or edit files under `src/`.
 * `src/models.py` is read-only for you. If a test needs a field that isn't there, report
   `NEEDS ARCHITECT` and write the test against the field you wish existed, marked `xfail`.
 * Never read `.env`; never print or invent credentials.

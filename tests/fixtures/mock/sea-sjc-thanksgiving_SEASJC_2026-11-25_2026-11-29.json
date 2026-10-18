@@ -1,0 +1,101 @@
+{
+  "observations": [
+    {
+      "watchlist_id": "sea-sjc-thanksgiving",
+      "target_id": "sea-sjc-thanksgiving:SEASJC:2026-11-25:2026-11-29",
+      "provider": "serpapi",
+      "itinerary": {
+        "slices": [
+          {"segments": [
+            {"carrier": "AS", "operating_carrier": null, "flight_number": "327", "origin": "SEA", "destination": "SJC",
+             "departure_local": "2026-11-25T07:00:00-08:00", "arrival_local": "2026-11-25T09:25:00-08:00", "aircraft": null}
+          ]},
+          {"segments": [
+            {"carrier": "AS", "operating_carrier": null, "flight_number": "328", "origin": "SJC", "destination": "SEA",
+             "departure_local": "2026-11-29T18:00:00-08:00", "arrival_local": "2026-11-29T20:30:00-08:00", "aircraft": null}
+          ]}
+        ]
+      },
+      "price_cents": 31800,
+      "currency": "USD",
+      "fare_brand": "main_cabin",
+      "fare_brand_raw": "Main",
+      "changeable": true,
+      "refundable": false,
+      "carry_on_included": true,
+      "seats_remaining": 6,
+      "booking_url": "https://example.test/book/as-327",
+      "raw_payload_ref": null,
+      "risk": {"passed": true, "rejections": [], "brand_unverified": false, "config_hash": "fixture"}
+    },
+    {
+      "watchlist_id": "sea-sjc-thanksgiving",
+      "target_id": "sea-sjc-thanksgiving:SEASJC:2026-11-25:2026-11-29",
+      "provider": "mock",
+      "itinerary": {
+        "slices": [
+          {"segments": [
+            {"carrier": "DL", "operating_carrier": null, "flight_number": "1553", "origin": "SEA", "destination": "SLC",
+             "departure_local": "2026-11-25T06:30:00-08:00", "arrival_local": "2026-11-25T09:15:00-07:00", "aircraft": null},
+            {"carrier": "DL", "operating_carrier": null, "flight_number": "2711", "origin": "SLC", "destination": "SJC",
+             "departure_local": "2026-11-25T10:30:00-07:00", "arrival_local": "2026-11-25T11:50:00-08:00", "aircraft": null}
+          ]},
+          {"segments": [
+            {"carrier": "DL", "operating_carrier": null, "flight_number": "2300", "origin": "SJC", "destination": "SEA",
+             "departure_local": "2026-11-29T17:50:00-08:00", "arrival_local": "2026-11-29T20:20:00-08:00", "aircraft": null}
+          ]}
+        ]
+      },
+      "price_cents": 26900,
+      "currency": "USD",
+      "fare_brand": "main_cabin",
+      "fare_brand_raw": null,
+      "changeable": null,
+      "refundable": null,
+      "carry_on_included": null,
+      "seats_remaining": null,
+      "booking_url": null,
+      "raw_payload_ref": null,
+      "risk": {"passed": true, "rejections": [], "brand_unverified": false, "config_hash": "fixture"}
+    },
+    {
+      "watchlist_id": "sea-sjc-thanksgiving",
+      "target_id": "sea-sjc-thanksgiving:SEASJC:2026-11-25:2026-11-29",
+      "provider": "serpapi",
+      "itinerary": {
+        "slices": [
+          {"segments": [
+            {"carrier": "AS", "operating_carrier": null, "flight_number": "331", "origin": "SEA", "destination": "SJC",
+             "departure_local": "2026-11-25T09:10:00-08:00", "arrival_local": "2026-11-25T11:35:00-08:00", "aircraft": null}
+          ]},
+          {"segments": [
+            {"carrier": "AS", "operating_carrier": null, "flight_number": "328", "origin": "SJC", "destination": "SEA",
+             "departure_local": "2026-11-29T18:00:00-08:00", "arrival_local": "2026-11-29T20:30:00-08:00", "aircraft": null}
+          ]}
+        ]
+      },
+      "price_cents": 22900,
+      "currency": "USD",
+      "fare_brand": "basic_economy",
+      "fare_brand_raw": "Saver",
+      "changeable": false,
+      "refundable": false,
+      "carry_on_included": false,
+      "seats_remaining": null,
+      "booking_url": null,
+      "raw_payload_ref": null,
+      "risk": {"passed": false, "rejections": ["basic_economy"], "brand_unverified": false, "config_hash": "fixture"}
+    }
+  ],
+  "band": {
+    "watchlist_id": "sea-sjc-thanksgiving",
+    "target_id": "sea-sjc-thanksgiving:SEASJC:2026-11-25:2026-11-29",
+    "provider": "serpapi",
+    "lowest_price_cents": 26900,
+    "typical_low_cents": 28000,
+    "typical_high_cents": 36000,
+    "price_level": "low",
+    "currency": "USD"
+  },
+  "raw": {"source": "fixture", "note": "sea-sjc-thanksgiving with a basic economy trap"}
+}
