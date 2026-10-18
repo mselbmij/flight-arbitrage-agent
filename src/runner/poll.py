@@ -47,8 +47,11 @@ _MAX_ERROR_CHARS = 200
 
 
 class Notifier(Protocol):
-    def send(self, alert: Alert, *, click: str | None = None) -> str | None:
-        """Deliver the alert; `click` is the booking URL of the observation that caused it.
+    def send(
+        self, alert: Alert, *, click: str | None = None, priority: int | None = None
+    ) -> str | None:
+        """Deliver the alert; `click` is the booking URL of the observation that caused it,
+        `priority` overrides the kind's ntfy priority (the CLI's operational pings only).
         Returns the channel name on success, None on failure or no-op."""
         ...
 
@@ -57,7 +60,9 @@ class NullNotifier:
     """Phase 5 default: logs the title and reports no channel, so the alert stays undelivered
     and the Phase 6 notifier can retry it."""
 
-    def send(self, alert: Alert, *, click: str | None = None) -> str | None:
+    def send(
+        self, alert: Alert, *, click: str | None = None, priority: int | None = None
+    ) -> str | None:
         log.info("alert (not delivered): %s", alert.message.split("\n", 1)[0])
         return None
 
@@ -348,10 +353,32 @@ class _Poller:
                 target_id=None,
                 kind=AlertKind.PROVIDER_ERROR,
                 regime=wl.regime_for(target, now),
-                message=f"{provider.value} failed for {wl.id}\n{target.target_id}: {detail}",
+                message=f"{provider.value} failed for {wl.id}\n{target.target_id}: {detail}"
+                f"\nFix: {provider_fix(provider, e)}",
                 alert_key=f"{wl.id}:provider_error:{target.target_id}:{provider.value}",
             )
         )
+
+
+_KEY_VARS = {
+    Provider.SERPAPI: "SERPAPI_KEY",
+    Provider.AMADEUS: "AMADEUS_CLIENT_ID / AMADEUS_CLIENT_SECRET",
+}
+
+
+def provider_fix(provider: Provider, e: ProviderError) -> str:
+    """One line telling the human what to do about a provider failure."""
+    text = str(e).lower()
+    keys = _KEY_VARS.get(provider, "the provider credentials")
+    if e.status_code in (401, 403) or "invalid api key" in text:
+        return f"credentials rejected: check {keys} in .env"
+    if e.status_code == 429 or "run out of searches" in text or "quota" in text:
+        return "rate-limited or out of quota: check the plan's usage; lower MAX_DAILY_API_CALLS"
+    if e.retryable:
+        return "transient, retried next run; act only if it repeats"
+    if e.status_code == 400:
+        return "request rejected: check this watchlist's airports, dates and constraints"
+    return "see ops/poll.log and the newest file under data/raw/"
 
 
 def _ms(started: float) -> int:

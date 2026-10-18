@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 import re
+import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -15,7 +17,7 @@ from typer.testing import CliRunner
 
 from src.db import Database
 from src.ingestion.mock_client import MockProvider
-from src.models import Provider, Run, WatchlistFile
+from src.models import Alert, AlertKind, Provider, Regime, Run, WatchlistFile
 from src.runner.cli import app
 from tests.conftest import REPO, make_alert, make_obs, make_run
 
@@ -1063,11 +1065,21 @@ def test_alert_test_without_a_topic_exits_1(no_ntfy_env: None):
 # -- health ------------------------------------------------------------------------------------ #
 
 
-def run_at(dbp: Path, hours_ago: float, run_id: str = "r1", trigger: str = "cron") -> None:
+def run_at(
+    dbp: Path,
+    hours_ago: float,
+    run_id: str = "r1",
+    trigger: str = "cron",
+    status: str | None = "ok",
+    error: str | None = None,
+) -> None:
+    """A run started `hours_ago`; finished with `status` unless it is None (still running)."""
     when = datetime.now(UTC) - timedelta(hours=hours_ago)
     with Database(dbp) as d:
         d.migrate()
         d.start_run(Run(run_id=run_id, started_at=when, trigger=trigger))  # type: ignore[arg-type]
+        if status is not None:
+            d.finish_run(run_id, status, error)
 
 
 def test_health_fresh_run_exits_0_prints_the_age_and_sends_nothing(tmp_path: Path, ntfy_env: None):
@@ -1092,7 +1104,7 @@ def test_health_stale_run_alerts_and_exits_1_without_storing_an_alert(
     assert res.exit_code == 1, res.output
     req = route.calls.last.request
     assert req.headers["Title"] == "fare tracker: no run in 36h"
-    assert req.headers["Priority"] == "2"
+    assert req.headers["Priority"] == "4"
     assert rows(dbp, "SELECT * FROM alerts") == []
 
 
@@ -1109,11 +1121,21 @@ def test_health_max_age_hours_is_respected_and_named_in_the_title(
     assert "fare tracker: no run in 4h" in res.output
 
 
+def fresh_backup(tmp_path: Path) -> Path:
+    backups = tmp_path / "backups"
+    backups.mkdir(exist_ok=True)
+    (backups / "fares-20261018-0300.db").write_bytes(b"x")
+    return backups
+
+
 def test_health_uses_the_newest_run(tmp_path: Path, no_ntfy_env: None):
     dbp = tmp_path / "fares.db"
     run_at(dbp, 100, "old")
     run_at(dbp, 1, "new")
-    assert runner.invoke(app, ["health", "--db", str(dbp)]).exit_code == 0
+    res = runner.invoke(
+        app, ["health", "--db", str(dbp), "--backup-dir", str(fresh_backup(tmp_path))]
+    )
+    assert res.exit_code == 0, res.output
 
 
 def test_health_with_no_runs_alerts_and_exits_1(tmp_path: Path, no_ntfy_env: None):
@@ -1155,3 +1177,187 @@ def test_health_still_exits_1_when_ntfy_is_down(tmp_path: Path, ntfy_env: None):
         m.post(TOPIC_URL).respond(500)
         res = runner.invoke(app, ["health", "--db", str(dbp)])
     assert res.exit_code == 1
+
+
+# -- health: the failure modes beyond "no run" ------------------------------------------------- #
+
+
+def health_log(dbp: Path, *extra: str):
+    return runner.invoke(app, ["health", "--db", str(dbp), "--notifier", "log", *extra])
+
+
+def api_call_at(dbp: Path, run_id: str, status: str, error: str | None = None) -> None:
+    with Database(dbp) as d:
+        d.con.execute(
+            "INSERT INTO api_calls (run_id, called_at, provider, endpoint, status, error) "
+            "VALUES (?, ?, 'serpapi', 'search:SEASJC', ?, ?)",
+            (run_id, datetime.now(UTC).isoformat(), status, error),
+        )
+        d.con.commit()
+
+
+def test_health_flags_a_failed_last_run_with_its_error(tmp_path: Path, no_ntfy_env: None):
+    dbp = tmp_path / "fares.db"
+    run_at(dbp, 1, status="error", error="OperationalError('database is locked')")
+    res = health_log(dbp)
+    assert res.exit_code == 1
+    assert "fare tracker: last poll failed" in res.output
+    assert "database is locked" in res.output
+
+
+def test_health_flags_a_run_killed_mid_poll(tmp_path: Path, no_ntfy_env: None):
+    dbp = tmp_path / "fares.db"
+    run_at(dbp, 3, status=None)
+    res = health_log(dbp)
+    assert res.exit_code == 1 and "poll killed mid-run" in res.output
+
+
+def test_health_does_not_flag_a_run_still_in_progress(tmp_path: Path, no_ntfy_env: None):
+    dbp = tmp_path / "fares.db"
+    run_at(dbp, 0.1, status=None)
+    assert health_log(dbp).exit_code == 0
+
+
+def test_health_flags_every_api_call_failing_with_the_latest_error(
+    tmp_path: Path, no_ntfy_env: None
+):
+    dbp = tmp_path / "fares.db"
+    run_at(dbp, 1)
+    api_call_at(dbp, "r1", "error", "SerpAPI HTTP 401: Invalid API key")
+    res = health_log(dbp)
+    assert res.exit_code == 1
+    assert "every API call failed in 36h" in res.output and "Invalid API key" in res.output
+    assert "fix the key in .env" in res.output
+
+
+def test_health_flags_successful_calls_that_stored_no_fares(tmp_path: Path, no_ntfy_env: None):
+    dbp = tmp_path / "fares.db"
+    run_at(dbp, 1)
+    api_call_at(dbp, "r1", "ok")
+    res = health_log(dbp)
+    assert res.exit_code == 1 and "no fares stored in 36h" in res.output
+
+
+def test_health_flags_undelivered_alerts_by_title(tmp_path: Path, no_ntfy_env: None):
+    dbp = tmp_path / "fares.db"
+    run_at(dbp, 1)
+    with Database(dbp) as d:
+        d.insert_alert(
+            Alert(
+                created_at=datetime.now(UTC),
+                watchlist_id="sea-sjc",
+                kind=AlertKind.BUY,
+                regime=Regime.PRIME,
+                message="BUY SEA→SJC $269\nbody",
+                alert_key="k",
+            )
+        )
+    res = health_log(dbp)
+    assert res.exit_code == 1
+    assert "1 alert(s) not delivered" in res.output and "BUY SEA→SJC $269" in res.output
+
+
+def test_health_flags_missing_and_stale_backups_once_one_is_owed(tmp_path: Path, no_ntfy_env: None):
+    dbp = tmp_path / "fares.db"
+    backups = tmp_path / "backups"
+    run_at(dbp, 40, "old")
+    run_at(dbp, 1, "new")
+    res = health_log(dbp, "--backup-dir", str(backups))
+    assert res.exit_code == 1 and "database backup is stale" in res.output
+    assert "no backups in" in res.output
+
+    old = fresh_backup(tmp_path) / "fares-20261018-0300.db"
+    stamp = (datetime.now(UTC) - timedelta(hours=50)).timestamp()
+    os.utime(old, (stamp, stamp))
+    res = health_log(dbp, "--backup-dir", str(backups))
+    assert res.exit_code == 1 and "is 50h old" in res.output
+
+    os.utime(old)
+    assert health_log(dbp, "--backup-dir", str(backups)).exit_code == 0
+
+
+def test_health_does_not_ask_for_a_backup_before_one_is_due(tmp_path: Path, no_ntfy_env: None):
+    dbp = tmp_path / "fares.db"
+    run_at(dbp, 5)
+    assert health_log(dbp, "--backup-dir", str(tmp_path / "none")).exit_code == 0
+
+
+def test_health_flags_low_disk(tmp_path: Path, no_ntfy_env: None):
+    dbp = tmp_path / "fares.db"
+    run_at(dbp, 1)
+    res = health_log(dbp, "--min-free-mb", str(10**9))
+    assert res.exit_code == 1 and "disk almost full" in res.output
+
+
+def test_health_sends_one_ping_listing_every_problem_with_its_fix(tmp_path: Path, ntfy_env: None):
+    dbp = tmp_path / "fares.db"
+    run_at(dbp, 40, status="error", error="boom")
+    with respx.mock(assert_all_called=False) as m:
+        route = m.post(TOPIC_URL).respond(200)
+        res = runner.invoke(app, ["health", "--db", str(dbp)])
+    assert res.exit_code == 1
+    assert route.call_count == 1
+    req = route.calls.last.request
+    assert req.headers["Title"] == "fare tracker: no run in 36h"
+    assert req.headers["Priority"] == "4"
+    body = req.content.decode()
+    assert "last poll failed: boom" in body and "database backup is stale" in body
+    assert body.count("Fix: ") == 3
+
+
+# -- poll: failures before or during a run ping the phone -------------------------------------- #
+
+
+def test_poll_with_no_providers_pings_with_the_fix(
+    tmp_path: Path, poll_env: Path, ntfy_env: None, monkeypatch: pytest.MonkeyPatch
+):
+    for var in ("SERPAPI_KEY", "AMADEUS_CLIENT_ID", "AMADEUS_CLIENT_SECRET"):
+        monkeypatch.delenv(var, raising=False)
+    cfg = write(tmp_path, POLL_YAML)
+    with respx.mock(assert_all_called=False) as m:
+        route = m.post(TOPIC_URL).respond(200)
+        res = runner.invoke(app, ["poll", "--db", str(tmp_path / "x.db"), "--config", str(cfg)])
+    assert res.exit_code == 1 and "no providers configured" in res.output
+    req = route.calls.last.request
+    assert req.headers["Title"] == "fare tracker: poll failed"
+    assert req.headers["Priority"] == "4"
+    assert "Fix: set SERPAPI_KEY" in req.content.decode()
+
+
+def test_poll_with_an_invalid_config_pings_and_exits_1(
+    tmp_path: Path, poll_env: Path, ntfy_env: None
+):
+    cfg = write(tmp_path, "watchlists: [ {id: 1")
+    with respx.mock(assert_all_called=False) as m:
+        route = m.post(TOPIC_URL).respond(200)
+        res = runner.invoke(app, ["poll", "--db", str(tmp_path / "x.db"), "--config", str(cfg)])
+    assert res.exit_code == 1 and "cannot load" in res.output
+    assert "watchlists.yaml is invalid" in route.calls.last.request.content.decode()
+
+
+@freeze_time(NOW)
+def test_poll_crash_marks_the_run_errored_and_pings(
+    tmp_path: Path, poll_env: Path, monkeypatch: pytest.MonkeyPatch
+):
+    def boom(*a, **k):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr("src.runner.poll._Poller.run", boom)
+    args, dbp = poll_args(tmp_path)
+    res = runner.invoke(app, [*args, "--notifier", "log"])
+    assert res.exit_code == 1
+    assert "fare tracker: poll failed" in res.output
+    [run] = rows(dbp, "SELECT * FROM runs")
+    assert run["status"] == "error" and "locked" in run["error"]
+
+
+def test_poll_failure_with_the_null_notifier_sends_nothing(
+    tmp_path: Path, poll_env: Path, monkeypatch: pytest.MonkeyPatch
+):
+    for var in ("SERPAPI_KEY", "AMADEUS_CLIENT_ID", "AMADEUS_CLIENT_SECRET"):
+        monkeypatch.delenv(var, raising=False)
+    cfg = write(tmp_path, POLL_YAML)
+    res = runner.invoke(
+        app, ["poll", "--db", str(tmp_path / "x.db"), "--config", str(cfg), "--notifier", "null"]
+    )
+    assert res.exit_code == 1 and "poll failed" not in res.output

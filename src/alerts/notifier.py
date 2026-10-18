@@ -59,10 +59,14 @@ class NtfyNotifier:
         self._client = client
         self.timeout = timeout
 
-    def send(self, alert: Alert, *, click: str | None = None) -> str | None:
-        """POST the alert. "ntfy" on a 2xx, None on any other outcome."""
+    def send(
+        self, alert: Alert, *, click: str | None = None, priority: int | None = None
+    ) -> str | None:
+        """POST the alert. "ntfy" on a 2xx, None on any other outcome. `priority` overrides the
+        kind's mapping (operational pings that need a fix, not stored alerts)."""
         title, body = split_message(alert.message)
-        priority, tags = NTFY_MAPPING[alert.kind]
+        mapped, tags = NTFY_MAPPING[alert.kind]
+        priority = priority or mapped
         headers = {
             "Title": _latin1(title).replace("\r", "").encode("latin-1"),
             "Priority": str(priority).encode(),
@@ -97,6 +101,8 @@ class NtfyNotifier:
 class LogNotifier:
     """`--notifier log`: print the title; nothing leaves the machine."""
 
-    def send(self, alert: Alert, *, click: str | None = None) -> str | None:
+    def send(
+        self, alert: Alert, *, click: str | None = None, priority: int | None = None
+    ) -> str | None:
         print(split_message(alert.message)[0])
         return "log"

@@ -18,11 +18,11 @@ from tests.conftest import REPO, make_run
 SCRIPTS = REPO / "scripts"
 SH = shutil.which("sh") or "/bin/sh"
 SH_FILES = sorted(SCRIPTS.glob("*.sh"))
-TOOLS = ("dirname", "sed", "tail", "mkdir", "date", "rm", "mv", "ls", "sort", "python3")
+TOOLS = ("dirname", "sed", "tail", "mkdir", "date", "rm", "mv", "ls", "sort", "python3", "printf")
 
 
 def test_the_expected_scripts_exist_and_are_executable():
-    assert {p.name for p in SH_FILES} == {"backup_db.sh", "install.sh"}
+    assert {p.name for p in SH_FILES} == {"backup_db.sh", "install.sh", "notify.sh"}
     for p in SH_FILES:
         assert os.access(p, os.X_OK), p
 
@@ -169,3 +169,80 @@ def test_backup_dir_is_configurable(tree: Path):
     res = run_backup(tree, BACKUP_DIR="elsewhere")
     assert res.returncode == 0, res.stderr
     assert len(list((tree / "elsewhere").glob("fares-*.db"))) == 1
+
+
+# -- notify.sh and the backup failure ping ---------------------------------------------------- #
+
+FAKE_CURL = """#!/bin/sh
+printf '%s\\n' "$@" >> "$(dirname "$0")/curl.args"
+"""
+
+
+def fake_curl_path(root: Path) -> str:
+    """PATH with a `curl` that records its arguments in <root>/bin/curl.args."""
+    path = no_sqlite3_path(root)
+    curl = root / "bin" / "curl"
+    curl.write_text(FAKE_CURL)
+    curl.chmod(0o755)
+    return path
+
+
+def run_notify(root: Path, *args: str, path: str, **env: str):
+    full = {k: v for k, v in os.environ.items() if not k.startswith("NTFY_")}
+    full.update(env, PATH=path)
+    return subprocess.run(
+        [SH, str(root / "scripts" / "notify.sh"), *args], env=full, capture_output=True, text=True
+    )
+
+
+@pytest.fixture
+def notify_tree(tmp_path: Path) -> Path:
+    (tmp_path / "scripts").mkdir()
+    shutil.copy(SCRIPTS / "notify.sh", tmp_path / "scripts" / "notify.sh")
+    return tmp_path
+
+
+def test_notify_without_a_topic_exits_1_and_sends_nothing(notify_tree: Path):
+    path = fake_curl_path(notify_tree)
+    res = run_notify(notify_tree, "t", "b", path=path)
+    assert res.returncode == 1 and "NTFY_TOPIC" in res.stderr
+    assert not (notify_tree / "bin" / "curl.args").exists()
+
+
+def test_notify_posts_title_priority_and_body_to_the_topic_from_dot_env(notify_tree: Path):
+    (notify_tree / ".env").write_text(
+        "NTFY_SERVER=https://ntfy.example.test/\nNTFY_TOPIC=fares-test   # mine\nNTFY_TOKEN=\n"
+    )
+    path = fake_curl_path(notify_tree)
+    res = run_notify(notify_tree, "fare tracker: backup failed", "the body", path=path)
+    assert res.returncode == 0, res.stderr
+    args = (notify_tree / "bin" / "curl.args").read_text().splitlines()
+    assert args[-1] == "https://ntfy.example.test/fares-test"
+    assert "Title: fare tracker: backup failed" in args and "Priority: 4" in args
+    assert "the body" in args and not any(a.startswith("Authorization") for a in args)
+
+
+def test_notify_sends_the_bearer_token_when_set(notify_tree: Path):
+    path = fake_curl_path(notify_tree)
+    res = run_notify(notify_tree, "t", path=path, NTFY_TOPIC="x", NTFY_TOKEN="tk_secret")
+    assert res.returncode == 0, res.stderr
+    args = (notify_tree / "bin" / "curl.args").read_text().splitlines()
+    assert "Authorization: Bearer tk_secret" in args
+
+
+def test_a_failed_backup_pings_through_notify(tmp_path: Path):
+    (tmp_path / "scripts").mkdir()
+    for name in ("backup_db.sh", "notify.sh"):
+        shutil.copy(SCRIPTS / name, tmp_path / "scripts" / name)
+    path = fake_curl_path(tmp_path)
+    res = run_backup(tmp_path, path=path, NTFY_TOPIC="fares-test")
+    assert res.returncode != 0 and "no database" in res.stderr
+    args = (tmp_path / "bin" / "curl.args").read_text().splitlines()
+    assert "Title: fare tracker: backup failed" in args
+
+
+def test_a_successful_backup_sends_nothing(tree: Path):
+    shutil.copy(SCRIPTS / "notify.sh", tree / "scripts" / "notify.sh")
+    path = fake_curl_path(tree)
+    assert run_backup(tree, path=path, NTFY_TOPIC="fares-test").returncode == 0
+    assert not (tree / "bin" / "curl.args").exists()

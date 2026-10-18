@@ -3,11 +3,13 @@
 # (scripts/install.sh prints this file with your real path filled in). Times are host-local.
 PATH=/usr/local/bin:/usr/bin:/bin
 
-# polls at 06:50 and 17:20 plus 0-8 min of jitter (awk, so it works under dash/sh as well as bash)
-50 6,17 * * *  sleep $(awk 'BEGIN{srand(); print int(rand()*540)}'); cd /opt/flight-arbitrage-agent && .venv/bin/fares poll --trigger cron >> ops/poll.log 2>&1
+# polls at 06:50 and 17:20 plus 0-8 min of jitter (awk, so it works under dash/sh as well as bash).
+# fares pings the phone itself on exit 1/2; any other exit (126/127: the venv is gone) means it
+# never started, so notify.sh pings from shell.
+50 6,17 * * *  sleep $(awk 'BEGIN{srand(); print int(rand()*540)}'); cd /opt/flight-arbitrage-agent && { .venv/bin/fares poll --trigger cron >> ops/poll.log 2>&1 || [ $? -le 2 ] || scripts/notify.sh "fare tracker: poll could not start" "fares poll did not run: see ops/poll.log, then re-run scripts/install.sh"; }
 
-# nightly online backup, newest 14 kept
+# nightly online backup, newest 14 kept; pings the phone through notify.sh when it fails
 0 3 * * *  /opt/flight-arbitrage-agent/scripts/backup_db.sh >> /opt/flight-arbitrage-agent/ops/backup.log 2>&1
 
-# watchdog: pings the phone (and exits 1) if no run has started in 36h
-0 9,21 * * *  cd /opt/flight-arbitrage-agent && .venv/bin/fares health >> ops/health.log 2>&1
+# watchdog: pings the phone (and exits 1) on any silent failure, see `fares health --help`
+0 9,21 * * *  cd /opt/flight-arbitrage-agent && { .venv/bin/fares health >> ops/health.log 2>&1 || [ $? -eq 1 ] || scripts/notify.sh "fare tracker: health check could not run" "fares health did not run: see ops/health.log, then re-run scripts/install.sh"; }

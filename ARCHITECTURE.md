@@ -381,9 +381,18 @@ Rules:
   alerts younger than 24 h (`RETRY_WINDOW_HOURS`), oldest first, then gives up and logs the count.
 * The notifier never composes a message; `rules.py` does. The notifier formats and ships.
 * `fares alert-test` sends one `PROVIDER_ERROR`-priority ping (touching no DB) so you can confirm
-  the phone subscription before Phase 6 goes live. `fares health` is the external watchdog: if no
-  non-seed run started within `--max-age-hours` (default 36) it sends a `PROVIDER_ERROR`-priority
-  `fare tracker: no run in Nh` through the notifier and exits 1; it stores nothing.
+  the phone subscription before Phase 6 goes live. `fares health` is the external watchdog
+  (`src/runner/health.py`): no non-seed run within `--max-age-hours` (default 36), newest run
+  errored, a run `running` for over 2 h, every API call in the window failed, calls succeeded but
+  stored no fares, undelivered alerts in the window, newest backup older than 30 h, under 200 MB
+  free. It sends one priority-4 message listing every problem with a `Fix:` line and exits 1; it
+  stores nothing.
+* `fares poll` pings `fare tracker: poll failed` (priority 4, with a fix) when it cannot load the
+  config, has no providers, refuses the live DB, or raises. Operational pings pass `priority=` to
+  `Notifier.send`; stored alerts never do. `PROVIDER_ERROR` alert bodies end with a `Fix:` line
+  (`poll.provider_fix`: credentials, quota, transient, bad request).
+* `scripts/notify.sh` is the shell fallback for what Python cannot report: `backup_db.sh` failing,
+  or `fares` exiting with anything but 0/1/2 from cron (the venv is gone).
 * `fares poll --notifier ntfy|log|null`; the default is ntfy when `NTFY_TOPIC` is set, else null
   with a warning.
 * Public ntfy topics are world-readable by name. Alerts carry route, dates, prices — nothing
@@ -436,6 +445,7 @@ counts as a one-way door").
 | Grid explosion starves the budget | `MAX_TARGETS_PER_WATCHLIST = 60` at load; `fares budget` before commit; round-robin guarantees every target is eventually polled | models + runner |
 | Flexible grid buys the wrong leg | `purchase.target_id` must be one of the watchlist's targets (validated); post-purchase polls only it | models |
 | Test-env prices polluting history | Amadeus test host forced to `provider=mock` | amadeus_client |
-| Runner host dies silently | `BUDGET_TRIPPED`/`PROVIDER_ERROR` alerts; cron log; a `fares health` check that alerts if no run in 36h | runner (Phase 6) |
+| Runner host dies silently | `BUDGET_TRIPPED`/`PROVIDER_ERROR` alerts; cron log; `fares health` alerts on no run in 36h, errored or killed runs, all calls failing, no fares, undelivered alerts, stale backups, low disk | runner (Phase 6) |
+| Poll or backup fails outright | `fares poll` pings `poll failed` with a fix; `backup_db.sh` and cron fall back to `scripts/notify.sh` | runner + scripts |
 | Alert sent but never seen | ntfy priority ≥ 4 for anything price-driven; `fares alert-test` before go-live | notifier |
 | Losing the DB | nightly `backup_db.sh` to a second disk / cloud bucket | scripts |

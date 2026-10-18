@@ -17,6 +17,12 @@ DB=${FARES_DB_PATH:-data/fares.db}
 BACKUP_DIR=${BACKUP_DIR:-data/backups}
 KEEP=${BACKUP_KEEP:-14}
 
+# on any failure, ping the phone too (notify.sh is optional: absent in a bare copy of this script)
+trap 'rc=$?; rm -f "${PART:-}"; if [ "$rc" -ne 0 ] && [ -x scripts/notify.sh ]; then
+    scripts/notify.sh "fare tracker: backup failed" "backup_db.sh exited $rc for $DB
+Fix: run scripts/backup_db.sh by hand and read ops/backup.log (disk full? DB path?)" || true
+fi' EXIT
+
 case "$DB$BACKUP_DIR" in
     *"'"*) echo "backup_db: quote characters in paths are not supported" >&2; exit 1 ;;
 esac
@@ -28,7 +34,6 @@ fi
 mkdir -p "$BACKUP_DIR"
 DEST="$BACKUP_DIR/fares-$(date +%Y%m%d-%H%M).db"
 PART="$DEST.part"
-trap 'rm -f "$PART"' EXIT
 rm -f "$PART"
 
 if command -v sqlite3 >/dev/null 2>&1; then

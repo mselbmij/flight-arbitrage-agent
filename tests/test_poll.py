@@ -26,7 +26,7 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from src.db import BudgetLimits, Database
-from src.ingestion.base import ProviderResult
+from src.ingestion.base import ProviderError, ProviderResult
 from src.ingestion.mock_client import MockProvider
 from src.models import (
     Alert,
@@ -47,6 +47,7 @@ from src.runner.poll import (
     Notifier,
     NullNotifier,
     ProviderRegistry,
+    provider_fix,
     run_poll,
     select_targets,
 )
@@ -1459,3 +1460,26 @@ def test_a_raising_notifier_during_retry_does_not_stop_the_run(tmp_path, caplog)
             _retry_undelivered(db, Boom())
         assert "leaving it undelivered" in caplog.text
         assert db.undelivered_alerts(max_age_hours=24)[0].id == aid
+
+
+# -- provider_fix: the remedy line on PROVIDER_ERROR alerts ------------------------------------ #
+
+
+@pytest.mark.parametrize(
+    ("err", "expected"),
+    [
+        (ProviderError(Provider.SERPAPI, "SerpAPI HTTP 401", status_code=401), "SERPAPI_KEY"),
+        (ProviderError(Provider.AMADEUS, "token: HTTP 403", status_code=403), "AMADEUS_CLIENT_ID"),
+        (ProviderError(Provider.SERPAPI, "SerpAPI error: Invalid API key."), "credentials"),
+        (ProviderError(Provider.SERPAPI, "HTTP 429", status_code=429, retryable=True), "quota"),
+        (
+            ProviderError(Provider.SERPAPI, "SerpAPI error: Your account has run out of searches."),
+            "quota",
+        ),
+        (ProviderError(Provider.SERPAPI, "timed out", retryable=True), "transient"),
+        (ProviderError(Provider.AMADEUS, "HTTP 400", status_code=400), "airports, dates"),
+        (ProviderError(Provider.SERPAPI, "unparseable SerpAPI payload"), "data/raw/"),
+    ],
+)
+def test_provider_fix_names_the_remedy(err: ProviderError, expected: str):
+    assert expected in provider_fix(err.provider, err)

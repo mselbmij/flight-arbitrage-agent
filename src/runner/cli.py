@@ -5,17 +5,19 @@ Environment is read when a command runs, never at import time. Every command tha
 database applies migrations first.
 """
 
+import errno
 import logging
 import os
 import sqlite3
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, NoReturn
 
 import typer
 import yaml
 from dotenv import load_dotenv
+from pydantic import ValidationError
 
 from src.alerts.notifier import LogNotifier, NtfyNotifier
 from src.db import BudgetLimits, Database, utcnow
@@ -24,6 +26,7 @@ from src.ingestion.amadeus_client import AmadeusProvider
 from src.ingestion.mock_client import MockProvider
 from src.ingestion.serpapi_client import SerpApiProvider
 from src.models import Alert, AlertKind, Provider, Regime, ResolvedWatchlist, WatchlistFile
+from src.runner import health as health_checks
 from src.runner.demo import demo_watchlist_file, write_demo_config
 from src.runner.poll import Notifier, NullNotifier, ProviderRegistry, run_poll
 from src.runner.seed import SeedScenario, generate
@@ -42,6 +45,9 @@ DEFAULT_MAX_CALLS_PER_RUN = 2
 DEFAULT_MAX_DAILY_API_CALLS = 3
 DEFAULT_NTFY_SERVER = "https://ntfy.sh"
 DEFAULT_HEALTH_MAX_AGE_HOURS = 36
+DEFAULT_BACKUP_DIR = "data/backups"
+#: ntfy priority for operational pings that need a human to fix something (high, not urgent).
+ACTION_PRIORITY = 4
 
 DbOpt = Annotated[Path | None, typer.Option("--db", help="SQLite path (default $FARES_DB_PATH).")]
 ConfigOpt = Annotated[
@@ -99,6 +105,50 @@ def _notifier(choice: NotifierChoice | PingNotifierChoice | None) -> Notifier:
         return NullNotifier()
     typer.echo("error: --notifier ntfy needs NTFY_TOPIC (see .env.example)", err=True)
     raise typer.Exit(1)
+
+
+def _ping(sink: Notifier, key: str, title: str, body: str, priority: int) -> str | None:
+    """Send an operational message that is not a stored alert (it never touches the DB)."""
+    alert = Alert(
+        created_at=utcnow(),
+        watchlist_id="fare-tracker",
+        kind=AlertKind.PROVIDER_ERROR,
+        regime=Regime.MONITOR,
+        message=f"{title}\n{body}",
+        alert_key=f"fare-tracker:{key}",
+    )
+    try:
+        return sink.send(alert, priority=priority)
+    except Exception:  # the ping is best effort; the exit code still reports the failure
+        log.exception("could not send %r", title)
+        return None
+
+
+def _poll_failed(sink: Notifier, message: str, fix: str) -> NoReturn:
+    """`fares poll` cannot do its job: say so on stderr (ops/poll.log) and on the phone."""
+    typer.echo(message, err=True)
+    _ping(
+        sink, "poll-failed", "fare tracker: poll failed", f"{message}\nFix: {fix}", ACTION_PRIORITY
+    )
+    raise typer.Exit(1)
+
+
+def _fix_for(e: BaseException) -> str:
+    """One line telling the human what to do about an exception that stopped a poll."""
+    text = str(e).lower()
+    if (isinstance(e, OSError) and e.errno == errno.ENOSPC) or "disk is full" in text:
+        return "disk full: prune data/raw/ and data/backups/, then run `fares poll` by hand"
+    if isinstance(e, sqlite3.OperationalError) and "locked" in text:
+        return "database locked: look for a stuck `fares poll` (ps aux | grep fares) and kill it"
+    if isinstance(e, sqlite3.DatabaseError) and ("malformed" in text or "not a database" in text):
+        return (
+            "database corrupt: restore the newest data/backups/ file (README, Backup and restore)"
+        )
+    if isinstance(e, PermissionError):
+        return "permission denied: the cron user must own data/ and ops/"
+    if isinstance(e, yaml.YAMLError | ValidationError):
+        return "config/watchlists.yaml is invalid: fix it, then check with `fares budget`"
+    return "see the traceback in ops/poll.log; run `fares poll` by hand to reproduce"
 
 
 def _load(config: Path) -> WatchlistFile:
@@ -364,8 +414,11 @@ def poll(
         )
         raise typer.Exit(1)
 
-    wf = _load(config)
     sink = _notifier(notifier)
+    try:
+        wf = _load(config)
+    except (OSError, yaml.YAMLError, ValidationError) as e:
+        _poll_failed(sink, f"error: cannot load {config}: {_short(e)}", _fix_for(e))
     if provider_override is not None:
         assert fixtures is not None
         wf = _with_mock_only(wf)
@@ -377,30 +430,30 @@ def poll(
             and _amadeus_configured()
             and os.environ.get("AMADEUS_HOST") != "production"
         ):
-            typer.echo(
+            _poll_failed(
+                sink,
                 f"refusing to poll {db_path}: it is the live database ($FARES_DB_PATH) and "
                 "Amadeus credentials are set but AMADEUS_HOST is not 'production'. Test-host "
                 "prices would pollute live history. Set AMADEUS_HOST=production, use a scratch "
                 "database (--db), or pass --allow-live-db.",
-                err=True,
+                "set AMADEUS_HOST=production in .env",
             )
-            raise typer.Exit(1)
         registry = _registry_from_env()
         if registry.is_empty():
-            typer.echo(
+            _poll_failed(
+                sink,
                 "no providers configured (set SERPAPI_KEY and/or AMADEUS_CLIENT_ID + "
                 "AMADEUS_CLIENT_SECRET, or use --provider-override mock --fixtures DIR)",
-                err=True,
+                "set SERPAPI_KEY in .env (cron reads .env from the checkout)",
             )
-            raise typer.Exit(1)
     limits = BudgetLimits(
         max_per_run=int(os.environ.get("MAX_CALLS_PER_RUN", DEFAULT_MAX_CALLS_PER_RUN)),
         max_per_day=int(os.environ.get("MAX_DAILY_API_CALLS", DEFAULT_MAX_DAILY_API_CALLS)),
     )
 
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    with Database(db_path) as d:
-        try:
+    try:
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        with Database(db_path) as d:
             run = run_poll(
                 d,
                 wf,
@@ -411,13 +464,18 @@ def poll(
                 trigger=trigger.value,  # type: ignore[arg-type]
                 now=utcnow,
             )
-        except Exception as e:  # run_poll has already marked the run errored
-            typer.echo(f"error: {e!r}", err=True)
-            raise typer.Exit(1) from e
-        _print_poll_summary(d, run.run_id)
-        status = run.status
+            _print_poll_summary(d, run.run_id)
+            status = run.status
+    except Exception as e:  # run_poll has already marked the run errored, if it got that far
+        log.exception("poll failed")
+        _poll_failed(sink, f"error: {e!r}"[:300], _fix_for(e))
     if status == "budget_tripped":
         raise typer.Exit(2)
+
+
+def _short(e: BaseException) -> str:
+    """First line of an exception, clipped: pydantic errors run to dozens of lines."""
+    return (str(e).splitlines() or [type(e).__name__])[0][:200]
 
 
 def _print_poll_summary(d: Database, run_id: str) -> None:
@@ -520,57 +578,65 @@ def alert_test(
         raise typer.Exit(1)
 
 
-def _latest_run_start(path: Path) -> datetime | None:
-    """started_at of the newest non-seed run, or None. Read-only: a missing file, an unmigrated
-    one and an empty one all mean 'no runs', and none of them is created or written."""
-    if not path.exists():
-        return None
-    con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
-    try:
-        row = con.execute("SELECT MAX(started_at) FROM runs WHERE \"trigger\" != 'seed'").fetchone()
-    except sqlite3.OperationalError:  # no runs table yet
-        return None
-    finally:
-        con.close()
-    return None if row[0] is None else datetime.fromisoformat(row[0])
-
-
 @app.command()
 def health(
     db: DbOpt = None,
     max_age_hours: Annotated[
         int, typer.Option("--max-age-hours", min=1, help="Alert when the last run is older.")
     ] = DEFAULT_HEALTH_MAX_AGE_HOURS,
+    backup_dir: Annotated[
+        Path | None,
+        typer.Option("--backup-dir", help="Where backup_db.sh writes (default $BACKUP_DIR)."),
+    ] = None,
+    backup_max_age_hours: Annotated[
+        int, typer.Option("--backup-max-age-hours", min=1, help="Alert when backups are older.")
+    ] = health_checks.DEFAULT_BACKUP_MAX_AGE_HOURS,
+    min_free_mb: Annotated[
+        int, typer.Option("--min-free-mb", min=0, help="Alert when the DB disk has less free.")
+    ] = health_checks.DEFAULT_MIN_FREE_MB,
     notifier: Annotated[
         PingNotifierChoice, typer.Option("--notifier", help="ntfy | log.")
     ] = PingNotifierChoice.NTFY,
 ) -> None:
-    """Watchdog for a silently dead runner: alert and exit 1 if no run started in the last
-    --max-age-hours (or ever). Stateless: reads the DB, writes nothing, stores no alert."""
+    """Watchdog for silent failures: no run in --max-age-hours, last poll errored or was killed,
+    every API call failing, no fares stored, alerts not delivered, stale backups, disk almost
+    full. Sends one ntfy message listing every problem with its fix, and exits 1. Stateless:
+    reads the DB, writes nothing, stores no alert."""
     path = _db_path(db)
-    latest = _latest_run_start(path)
+    load_dotenv()
+    backups = backup_dir or Path(os.environ.get("BACKUP_DIR") or DEFAULT_BACKUP_DIR)
     now = utcnow()
-    if latest is not None and now - latest <= timedelta(hours=max_age_hours):
+    problems = health_checks.check(
+        path,
+        now=now,
+        max_age_hours=max_age_hours,
+        backup_dir=backups,
+        backup_max_age_hours=backup_max_age_hours,
+        min_free_mb=min_free_mb,
+    )
+    if not problems:
+        latest = _latest_run_start(path)
+        assert latest is not None
         age = (now - latest).total_seconds() / 3600
         typer.echo(f"ok: last run {age:.1f}h ago (limit {max_age_hours}h)")
         return
-    title = f"fare tracker: no run in {max_age_hours}h"
-    detail = (
-        f"no runs recorded in {path}"
-        if latest is None
-        else f"last run started {latest.astimezone(UTC):%Y-%m-%d %H:%M} UTC"
+    for p in problems:
+        typer.echo(f"PROBLEM: {p.title} ({p.detail}) -- fix: {p.fix}", err=True)
+    body = "\n".join(
+        f"{p.title.removeprefix('fare tracker: ')}: {p.detail}\nFix: {p.fix}" for p in problems
     )
-    typer.echo(f"STALE: {title} ({detail})", err=True)
-    alert = Alert(
-        created_at=now,
-        watchlist_id="fare-tracker",
-        kind=AlertKind.PROVIDER_ERROR,
-        regime=Regime.MONITOR,
-        message=f"{title}\n{detail}",
-        alert_key="fare-tracker:health",
-    )
-    _notifier(notifier).send(alert)
+    _ping(_notifier(notifier), "health", problems[0].title, body, ACTION_PRIORITY)
     raise typer.Exit(1)
+
+
+def _latest_run_start(path: Path) -> datetime | None:
+    """started_at of the newest non-seed run, or None. Read-only."""
+    con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        row = con.execute("SELECT MAX(started_at) FROM runs WHERE \"trigger\" != 'seed'").fetchone()
+    finally:
+        con.close()
+    return None if row[0] is None else datetime.fromisoformat(row[0])
 
 
 if __name__ == "__main__":

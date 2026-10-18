@@ -71,11 +71,41 @@ the first time they fire, you do not get a second chance (undelivered alerts are
 only). Subscribe the ntfy phone app to the topic first, then test.
 
 The crontab polls at 06:50 and 17:20 (plus up to 9 minutes of jitter), backs the DB up at 03:00,
-and runs `fares health` at 09:00 and 21:00: if no run has started in 36 h it sends a low-priority
-`fare tracker: no run in 36h` ping to the same topic and exits 1 (it keeps no state and writes
-nothing to the DB; pass `--max-age-hours N` to change the limit). Cron uses the host's local time
-zone. Dry-run any notifier with `--notifier log` (prints titles instead of sending) and
-`fares poll --notifier null` stores alerts undelivered.
+and runs `fares health` at 09:00 and 21:00. Cron uses the host's local time zone. Dry-run any
+notifier with `--notifier log` (prints titles instead of sending) and `fares poll --notifier null`
+stores alerts undelivered.
+
+### Failure notifications
+
+Every failure below reaches the ntfy topic with a `Fix:` line. Operational pings are priority 4;
+`PROVIDER_ERROR` alerts stay at 2 (one failed call is often transient) and the health check
+escalates at 4 if failures continue.
+
+| Failure | Who notices | When | ntfy title |
+|---|---|---|---|
+| Provider call fails (bad key, quota, 400, timeout) | `fares poll` | that run | `serpapi failed for <watchlist>` (body says what to fix) |
+| API budget tripped | `fares poll` | that run | `API budget tripped (...)` |
+| Poll cannot start: invalid `watchlists.yaml`, no provider keys, Amadeus test host on the live DB | `fares poll` | that run | `fare tracker: poll failed` |
+| Poll crashes: DB locked or corrupt, disk full, permissions, bug | `fares poll` | that run | `fare tracker: poll failed` |
+| `fares` will not start (venv missing) | cron line → `scripts/notify.sh` | that run | `fare tracker: poll could not start` |
+| Backup fails | `backup_db.sh` → `scripts/notify.sh` | 03:00 | `fare tracker: backup failed` |
+| No run in 36 h (host down, cron removed) | `fares health` | 09:00 / 21:00 | `fare tracker: no run in 36h` |
+| Newest run errored | `fares health` | 09:00 / 21:00 | `fare tracker: last poll failed` |
+| A run still `running` after 2 h (killed: OOM, reboot) | `fares health` | 09:00 / 21:00 | `fare tracker: poll killed mid-run` |
+| Every API call in 36 h failed | `fares health` | 09:00 / 21:00 | `fare tracker: every API call failed in 36h` |
+| Calls succeed but no fares stored in 36 h | `fares health` | 09:00 / 21:00 | `fare tracker: no fares stored in 36h` |
+| Alerts not delivered (topic unset, ntfy down) | `fares health` | 09:00 / 21:00 | `fare tracker: N alert(s) not delivered` |
+| Newest backup older than 30 h | `fares health` | 09:00 / 21:00 | `fare tracker: database backup is stale` |
+| Under 200 MB free on the DB disk | `fares health` | 09:00 / 21:00 | `fare tracker: disk almost full` |
+
+`fares health` sends one message listing every problem it found (the title is the most urgent),
+exits 1, keeps no state and writes nothing to the DB. It repeats at each check until the problem is
+fixed. Limits: `--max-age-hours` (36), `--backup-max-age-hours` (30), `--backup-dir`
+(`$BACKUP_DIR`, else `data/backups`), `--min-free-mb` (200). `scripts/notify.sh TITLE [BODY]` reads
+`NTFY_*` from the environment or `.env` and posts with curl, or python3 when curl is missing.
+
+Nothing can tell you that ntfy itself is unreachable from the host: those pings fail, `fares
+health` exits 1 and the reason is in `ops/health.log` (and cron mail, if the host sends it).
 
 An alert whose ntfy POST did not return 2xx stays undelivered and is retried at the start of the
 next run if it is under 24 h old, then left alone (the run logs how many).
