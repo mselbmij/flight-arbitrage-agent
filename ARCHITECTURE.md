@@ -15,7 +15,7 @@ the doc is wrong until someone updates it in the same PR.
 | μ − 1.5σ Bollinger signals with a 14-observation cold-start gate | **External benchmark band only.** Internal stats are deferred to a "Phase 7, if ever". | 14 daily points is not a σ estimate, and the series drifts with DTD so a rolling mean fires on the drift. Google's typical-price band already encodes a year of route history. |
 | Duffel for live NDC verification | **Amadeus Self-Service** as the second provider; SerpAPI/Google Flights as primary | Duffel's live mode needs business verification and is priced per booking. Amadeus has a free production quota and returns branded fares. Provider is an interface; the choice is reversible. |
 | GitHub Actions cron + commit `fares.db` back to a branch | **cron on a host you control** (Pi / VPS / Mac mini), local SQLite, `scripts/backup_db.sh` | Actions cron is delayed at peak hours and auto-disabled after 60 days of repo inactivity. Committing a binary DB from a runner is non-idempotent and conflicts on overlap. Turso only if the dashboard must run off-host. |
-| `MAX_DAILY_API_CALLS = 25` | Set from the plan you pay for; default 4/day | 25/day is a paid SerpAPI tier. The breaker must match the budget or it protects nothing. |
+| `MAX_DAILY_API_CALLS = 25` | Set from the plan you pay for; default 3/day (SerpAPI free tier) | 25/day is a paid SerpAPI tier. The breaker must match the budget or it protects nothing. |
 | "20th percentile" thresholds | `price <= reference × multiplier`, reference ∈ {typical_low, typical_high, lowest_seen, ceiling} | Google gives a band, not percentiles. Thresholds are per-route config, not constants. |
 | Phases 1–6 as listed | Schema → DB + seeder → **dashboard on mock data** → ingestion + risk → rules → alerts → stats (maybe) | You can't write thresholds against data you haven't plotted. |
 | Regimes 1–4 | Adds `LATE` (DTD ≤ 14) and `EXPIRED` | The original was silent on the last two weeks. |
@@ -92,6 +92,7 @@ All rows validate through `src/models.py`. SQLite, WAL mode, one file.
 │ risk_passed               │      │ id             PK        │
 │ risk_rejections_json      │      │ created_at               │
 │ risk_brand_unverified     │      │ watchlist_id             │
+│ risk_inbound_unverified   │      │ (see below)              │
 │ risk_config_hash          │      │ target_id      (nullable)│
 └───────────────────────────┘      │ kind, regime             │
                                    │ observation_id FK (null) │
@@ -115,7 +116,7 @@ that don't change the leg. `config_hash` on each observation records which rules
 
 Storage rules: money INTEGER cents; enums as their string values; datetimes as tz-aware ISO text,
 naive input rejected at the boundary; `itinerary` as JSON (`itinerary_key` excluded, it is
-recomputed); `risk` flattened to four nullable columns, all-NULL when the verdict is absent.
+recomputed); `risk` flattened to five nullable columns, all-NULL when the verdict is absent.
 
 ### Why these choices
 
@@ -128,7 +129,7 @@ recomputed); `risk` flattened to four nullable columns, all-NULL when the verdic
   passenger's clock. "When did we poll" is about ours.
 * **Risk verdict stored on the row.** It is recomputable, but the dashboard needs it without
   re-running the engine, and `config_hash` says which rules produced it.
-* **Raw payloads on disk** (`data/raw/<run_id>/<provider>-<watchlist>.json`) rather than in the DB.
+* **Raw payloads on disk** (`data/raw/<run_id>/<provider>-<target_id with ':'→'_'>.json`, written before the DB insert) rather than in the DB.
   They exist for replay and for fixing brand mappings; they are not query data.
 
 ### Schema change policy
@@ -174,8 +175,19 @@ Rules the engine must honour:
   when `fare_brand_raw` is non-null; otherwise no alert. A row with `risk.inbound_unverified`
   (SerpAPI round trip, outbound slice only) gets the prefix `[return not checked]`; both prefixes
   may stack.
-* One alert per target per run: among qualifying observations the cheapest wins. Five fares in
-  the strike zone are one BUY, not five.
+* One alert per target per run: among qualifying observations the cheapest **verified** fare wins;
+  an unverified-brand fare (with a raw label) wins only when no verified fare qualifies, and when
+  a verified fare wins over a cheaper unverified one the body says `also seen: $190 "Weird"
+  (brand unverified)`. Five fares in the strike zone are one BUY, not five.
+* `CREDIT_DROP` candidates: same predicate as BUY, plus `fare_brand is not BASIC_ECONOMY` (even
+  when the watchlist allows it — you cannot re-fare into a BE ticket) and `changeable is not
+  False`. The DOT 7-day test and the "closes HH:MM" title use `purchased_at`'s own timezone, and
+  the title carries the zone label. Write `purchased_at` with your local offset.
+* `PROVIDER_ERROR` key: `{watchlist_id}:provider_error:{target_id}:{provider}` (stored with
+  `target_id` NULL so it never gates FENCE/DOT); `BUDGET_TRIPPED` key `{watchlist_id}:budget_tripped:-:0`,
+  text `API budget tripped (used/limit run|day)`.
+* Deferred (named phase 7): the grid-BUY line naming siblings polled in the last 48h. `evaluate`
+  has no sibling data today.
 * `ceiling_cents` is an absolute strike in every regime: price ≤ ceiling always alerts.
 * The strike reference `lowest_seen` is the min `price_cents` of **risk-passed** observations
   with a **verified brand** (`risk_brand_unverified = 0`) for that **target**, provider-independent.
@@ -264,8 +276,8 @@ client, logs the `ApiCall` and consults the breaker.
 
 Two gates, both read from `.env`:
 
-1. `MAX_CALLS_PER_RUN` (default 3): checked against `runs.calls_made` before each call.
-2. `MAX_DAILY_API_CALLS` (default 4): checked against `SUM(cost_units) FROM api_calls WHERE called_at >= today_utc`.
+1. `MAX_CALLS_PER_RUN` (default 2): checked against `runs.calls_made` before each call.
+2. `MAX_DAILY_API_CALLS` (default 3): checked against `SUM(cost_units) FROM api_calls WHERE called_at >= today_utc`.
 
 Either gate failing → log an `api_calls` row with `status=skipped_breaker`, set the run to
 `budget_tripped`, emit one `BUDGET_TRIPPED` alert, stop. No retries. The breaker is consulted
@@ -293,7 +305,20 @@ Inside one run, for each watchlist with status `watching`:
 2. Remaining budget: `targets_per_run` targets, ordered by least-recently-polled
    (`MAX(api_calls.called_at) GROUP BY target_id`, nulls first), then by DTD ascending so
    near-departure targets never starve. One exact-date call per provider per target.
-3. `status=purchased`: only `purchase.target_id`, every run, regardless of `targets_per_run`.
+3. `status=purchased`: only `purchase.target_id`, every run, regardless of `targets_per_run`; a
+   purchased target whose departure has passed is skipped. Purchased watchlists are polled
+   **first** so a wide grid cannot starve a credit-drop check.
+4. "Polled" means any ledger row that is not `skipped_breaker` — an erroring target still rotates
+   to the back; otherwise one deterministic failure pins the round-robin and burns the budget.
+5. `poll.times_per_day` is **enforced**: a watchlist that already has that many runs today (UTC,
+   distinct `run_id`s with a non-skipped call) is skipped with a log line, so `fares budget`'s
+   arithmetic is what the runner actually spends.
+6. A breaker trip between two providers of one target still evaluates the rows already paid for
+   before the run stops.
+7. `fares poll` on the live DB refuses to register an Amadeus client on a non-production host, and
+   refuses to run with no providers at all; `--allow-live-db` overrides the former only.
+8. Do not schedule cron before the notifier exists (Phase 6): once-only alerts (FENCE_WARNING,
+   DOT_24H) are gated on *insertion*, and an undelivered insert still spends the gate.
 
 **Providers and the breaker.** Every call to any provider is one unit under the single breaker;
 adding `amadeus` to a watchlist's `providers` doubles that watchlist's calls. Amadeus's free
