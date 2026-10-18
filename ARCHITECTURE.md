@@ -99,14 +99,14 @@ All rows validate through `src/models.py`. SQLite, WAL mode, one file.
         └──────────────────────────│ price_cents              │
                                    │ reference_cents          │
                                    │ message                  │
-                                   │ alert_key      UNIQUE    │
+                                   │ alert_key      idx       │
                                    │ delivered_at, channel    │
                                    └──────────────────────────┘
 ```
 
 Indexes that matter: `observations(target_id, observed_at)`, `observations(itinerary_key, observed_at)`,
 `api_calls(target_id, called_at)` (round-robin reads "last polled" from here; the breaker sums today),
-`alerts(alert_key)` unique.
+`alerts(alert_key, created_at)` (dedup lookup).
 
 Watchlists and targets are **not** tables. Watchlists live in YAML and are the source of truth; a
 `SearchTarget` is derived from the grid at load time and identified by a deterministic
@@ -171,7 +171,9 @@ Rules the engine must honour:
 * The strike reference `lowest_seen` is the min `price_cents` of **risk-passed** observations
   for that **target**, provider-independent. It is the only internal statistic allowed.
 * `alert_key` = `f"{target_id}:{kind}:{itinerary_key or '-'}:{price_bucket}"` where
-  `price_bucket = price_cents // 1000`. Same key within `dedup_window_hours` (default 24) is not re-sent.
+  `price_bucket = price_cents // 1000`. Same key within `dedup_window_hours` (default 24) is not
+  inserted (`Database.insert_alert` returns None). The key is not unique over all time — the same
+  fare can legitimately re-alert a day later.
   Watchlist-level kinds (`BUDGET_TRIPPED`) use `watchlist_id` in place of `target_id`.
 * `FENCE_WARNING` fires once per target, the first run after that target's DTD crosses 21. For a
   grid, the alert names the target and how many siblings are still in PRIME.
@@ -332,7 +334,7 @@ phases marked yes.
 | Phantom fare (aggregator cache stale) | second provider; alerts carry provider + observed_at; booking link opened by a human | ingestion |
 | Runaway API spend | two-gate breaker in the same transaction as the call log | db |
 | Toxic schedule | stops / layover / overnight / co-terminal / time-of-day filters | risk_filters |
-| Duplicate alerts | `alert_key` unique + dedup window | db + notifier |
+| Duplicate alerts | `insert_alert` refuses a repeat `alert_key` inside `dedup_window_hours`; index on `(alert_key, created_at)` | db + notifier |
 | Stats on too little data | no internal σ at all; `lowest_seen` is the only internal number | rules |
 | Grid explosion starves the budget | `MAX_TARGETS_PER_WATCHLIST = 60` at load; `fares budget` before commit; round-robin guarantees every target is eventually polled | models + runner |
 | Flexible grid buys the wrong leg | `purchase.target_id` must be one of the watchlist's targets (validated); post-purchase polls only it | models |
