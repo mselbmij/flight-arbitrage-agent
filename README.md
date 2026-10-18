@@ -28,7 +28,7 @@ src/models.py            Pydantic v2 schemas — the one-way door
 src/db.py                SQLite + circuit breaker           (Phase 2)
 src/ingestion/           serpapi, amadeus, mock providers    (Phase 4)
 src/engine/              risk_filters, rules                 (Phase 4–5)
-src/alerts/              telegram / discord                  (Phase 6)
+src/alerts/              ntfy.sh notifier                    (Phase 6)
 src/runner/              `fares` CLI, cron entrypoint        (Phase 2+)
 dashboard/app.py         Streamlit, read-only                (Phase 3)
 agents/                  role files for the AI build crew + lessons.md

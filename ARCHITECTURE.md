@@ -43,7 +43,7 @@ the doc is wrong until someone updates it in the same PR.
                       src/engine/rules.py         ──► Alert[] (regime-aware, external-band strikes,
                                    │                  post-purchase credit + DOT window)
                                    ▼
-                      src/alerts/notifier.py      ──► Telegram / Discord (idempotent by alert_key)
+                      src/alerts/notifier.py      ──► ntfy.sh topic (idempotent by alert_key)
 ```
 
 Everything is synchronous and single-process. One run = one `Run` row. The circuit breaker
@@ -230,6 +230,37 @@ both pass.
 trap). `fares key <watchlist_id>` prints the current cheapest risk-passed `itinerary_key` so you
 can paste it into `purchase:`.
 
+## 7a. Alerts (src/alerts/notifier.py)
+
+One channel: an [ntfy](https://ntfy.sh) topic, configured by `NTFY_SERVER` / `NTFY_TOPIC` /
+`NTFY_TOKEN`. One `httpx.post` per alert. No bots, no OAuth, phone app subscribes to the topic.
+
+Mapping from `Alert` to the ntfy request:
+
+| `AlertKind` | priority | tags | title |
+|---|---|---|---|
+| `BUY` | 5 (urgent) | `airplane,moneybag` | `BUY SEA→SJC $287 (DTD 34, prime)` |
+| `EXTREME_LOW` | 4 (high) | `airplane,eyes` | `Anomaly SEA→ORD $212 (DTD 88, monitor)` |
+| `FENCE_WARNING` | 3 | `hourglass` | `21-day fence SEA→SJC — buy window closing` |
+| `CREDIT_DROP` | 4 | `airplane,receipt` | `Re-fare SEA→JFK: now $368, paid $418` |
+| `DOT_24H` | 4 | `alarm_clock` | `DOT 24h window on SEA→JFK closes 09:30 tomorrow` |
+| `BUDGET_TRIPPED` | 3 | `warning` | `API budget tripped (4/4 today)` |
+| `PROVIDER_ERROR` | 2 | `x` | `serpapi failed for sea-sjc-thanksgiving` |
+
+Body = `Alert.message` (plain text, ≤ 500 chars: route, dates, price vs reference, brand, stops,
+provider + observed time). `Click` header = `booking_url` when present. `Markdown: yes` is
+**not** used — the iOS app renders it inconsistently.
+
+Rules:
+* `delivered_at` and `channel="ntfy"` are written in the same transaction as the alert row,
+  after a 2xx. A non-2xx leaves `delivered_at` null; the next run retries undelivered alerts
+  younger than `dedup_window_hours`, then gives up and logs.
+* The notifier never composes a message; `rules.py` does. The notifier formats and ships.
+* `fares alert-test` sends one `PROVIDER_ERROR`-priority ping so you can confirm the phone
+  subscription before Phase 6 goes live.
+* Public ntfy topics are world-readable by name. Alerts carry route, dates, prices — nothing
+  secret — so a public topic is acceptable. Rotate to a reserved topic + token if that changes.
+
 ## 8. Dashboard (dashboard/app.py)
 
 Streamlit + Plotly, read-only against `fares.db`. Three views, per watchlist:
@@ -249,7 +280,7 @@ Streamlit + Plotly, read-only against `fares.db`. Three views, per watchlist:
 | 3 | `dashboard/app.py` against seeded data | BUILDER → JANITOR | no |
 | 4 | `serpapi_client.py`, `amadeus_client.py`, `risk_filters.py` | TESTER → 2× BUILDER (parallel) → JANITOR | yes |
 | 5 | `rules.py` (regimes, strikes, post-purchase), `fares poll` end-to-end on mock | TESTER → BUILDER → JANITOR | yes |
-| 6 | `notifier.py`, cron + backup scripts, first live run with real keys | BUILDER → JANITOR | no |
+| 6 | `notifier.py` (ntfy), `fares alert-test`, cron + backup scripts, first live run with real keys | BUILDER → JANITOR | no |
 | 7? | internal statistics, only if ≥ 90 days of data across ≥ 3 routes says they add signal | ARCHITECT decides | yes |
 
 Branch per phase (`phase-N-<slug>`), PR into `main`, CI green + REVIEWER pass before merge on the
@@ -268,4 +299,5 @@ phases marked yes.
 | Stats on too little data | no internal σ at all; `lowest_seen` is the only internal number | rules |
 | Test-env prices polluting history | Amadeus test host forced to `provider=mock` | amadeus_client |
 | Runner host dies silently | `BUDGET_TRIPPED`/`PROVIDER_ERROR` alerts; cron log; a `fares health` check that alerts if no run in 36h | runner (Phase 6) |
+| Alert sent but never seen | ntfy priority ≥ 4 for anything price-driven; `fares alert-test` before go-live | notifier |
 | Losing the DB | nightly `backup_db.sh` to a second disk / cloud bucket | scripts |
