@@ -120,6 +120,7 @@ recomputed); `risk` flattened to four nullable columns, all-NULL when the verdic
 ### Why these choices
 
 * **Integer cents.** `$418.00` is `41800`. Float money is a bug waiting for a reviewer.
+  `price_cents` is the total for all `passengers` on the watchlist, as both providers quote it.
 * **`itinerary_key`** = sha1 of (carrier, flight number, local departure, origin, destination) per
   segment. Two providers reporting the same flights produce the same key, so post-purchase tracking
   and cross-provider comparison are joins, not heuristics. Price is not part of identity.
@@ -229,9 +230,15 @@ leave the ledger row `ok` and crash the run. Clients never pre-fill `risk` — t
 client, logs the `ApiCall` and consults the breaker.
 
 * **SerpAPI (Google Flights).** Primary. Supplies the benchmark band (`price_insights`). We send
-  `exclude_basic=true` whenever the watchlist disallows Basic Economy (Google filters at the
-  source; returned fares are stored as `MAIN_CABIN` / `google:exclude_basic`). Without that filter
-  brand detection is best-effort from extension strings and `UNKNOWN` is common. **Round trips
+  `exclude_basic=true` whenever the watchlist disallows Basic Economy. **Evidence beats the echo:**
+  any extension string containing "basic" → `BASIC_ECONOMY` regardless of the flag; the echoed
+  flag maps to `MAIN_CABIN` / `google:exclude_basic` only when both endpoints are US airports
+  (the filter is US-only); everything else is `UNKNOWN`. Time-of-day and layover constraints are
+  pushed into the request (`outbound_times`, `return_times`, `layover_duration`) so the unverified
+  return leg of a round trip at least obeys them. A zero-result search is HTTP 200 + `Success` + an
+  `error` string saying no results; it is empty, not an error. A single itinerary that fails
+  validation is skipped and counted (`raw["_skipped_invalid"]`), never the whole paid call. The
+  api key is scrubbed from `raw` before it is persisted. **Round trips
   return outbound legs only** — the return legs cost a second call via `departure_token`, which the
   free tier can't spare — so a SerpAPI round-trip observation has a one-slice itinerary and a
   round-trip total price. Its `itinerary_key` therefore differs from an Amadeus key for the same
@@ -240,7 +247,13 @@ client, logs the `ApiCall` and consults the breaker.
   localizes them via the `airportsdata` IATA→IANA table. An unknown airport skips that itinerary
   (counted in `raw["_skipped_unknown_airport"]`), never the whole call.
 * **Amadeus Self-Service.** Second price source with `fareBasis`/branded-fare detail. `AMADEUS_HOST=test`
-  returns fake prices and **must** be stored with `provider=mock`, never `amadeus`.
+  returns fake prices and **must** be stored with `provider=mock`, never `amadeus`. The brand is the
+  **worst across every segment of every traveler** (any Basic → Basic; any unmapped → Unknown);
+  carry-on / changeable / refundable are true only if true on every segment. Brand keywords that
+  are Basic-Economy equivalents map to `BASIC_ECONOMY`: `LIGHT` on any carrier, `SAVER` on Alaska
+  (`AS`); `SAVER` elsewhere is `UNKNOWN`. A label that is just the cabin name is not brand
+  evidence. False rejects cost a missed alert; false accepts cost an unchangeable ticket, so every
+  ambiguity resolves toward rejection.
 * **Mock.** Reads `tests/fixtures/*.json`. Used by the seeder and all unit tests.
 
 ## 6. Circuit breaker (src/db.py)
@@ -359,12 +372,19 @@ Three views, per watchlist:
 | 2 | `db.py` (schema, migrations, breaker), `fares seed`, mock provider, fixtures | TESTER → BUILDER → JANITOR | yes |
 | 3 | `dashboard/app.py` against seeded data | BUILDER → JANITOR | no |
 | 4 | `airports.py`, `serpapi_client.py`, `amadeus_client.py`, `risk_filters.py` | TESTER → 3× BUILDER (parallel worktrees) → JANITOR | yes |
-| 5 | `rules.py` (regimes, strikes, post-purchase), `fares poll` end-to-end on mock | TESTER → BUILDER → JANITOR | yes |
+| 5 | `rules.py` (regimes, strikes, post-purchase), `fares poll` end-to-end on mock | ARCHITECT (entry gate, below) → TESTER → BUILDER → JANITOR | yes |
 | 6 | `notifier.py` (ntfy), `fares alert-test`, cron + backup scripts, first live run with real keys | BUILDER → JANITOR | no |
 | 7? | internal statistics, only if ≥ 90 days of data across ≥ 3 routes says they add signal | ARCHITECT decides | yes |
 
 Branch per phase (`phase-N-<slug>`), PR into `main`, CI green + REVIEWER pass before merge on the
 phases marked yes.
+
+**Phase 5 entry gate (ARCHITECT decision, schema change):** a SerpAPI round-trip observation has a
+one-slice itinerary and a round-trip price; today only `raw["_note"]` says so, and the rules engine
+never reads `data/raw/`. The stored row must carry it — proposed `RiskVerdict.inbound_unverified:
+bool` (set by the engine when `target.is_round_trip and len(itinerary.slices) == 1`), with §3
+amended so a BUY on such a row is prefixed `[return not checked]` the way unverified brands are.
+Migration: one nullable column, no backfill.
 
 ## 10. Risk matrix (what can go wrong, what stops it)
 
