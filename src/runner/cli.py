@@ -61,8 +61,13 @@ def seed(
     end: Annotated[
         str | None, typer.Option(help="ISO timestamp of the last observation (default: now).")
     ] = None,
+    replace: Annotated[
+        bool, typer.Option("--replace", help="Delete existing seed data first.")
+    ] = False,
 ) -> None:
-    """Fill the database with synthetic history for every pollable target."""
+    """Fill the database with synthetic history for every pollable target.
+
+    Idempotent with --replace; refuses to run on top of existing seed data without it."""
     end_at = datetime.fromisoformat(end) if end else datetime.now(UTC)
     if end_at.tzinfo is None:
         end_at = end_at.replace(tzinfo=UTC)
@@ -73,6 +78,15 @@ def seed(
     unbounded = BudgetLimits(max_per_run=10**9, max_per_day=10**9)
     with _open(db) as d:
         d.migrate()
+        existing = d.con.execute("SELECT COUNT(*) FROM runs WHERE \"trigger\"='seed'").fetchone()[0]
+        if existing and not replace:
+            typer.echo(
+                f"{existing} seed runs already present; re-run with --replace to regenerate.",
+                err=True,
+            )
+            raise typer.Exit(1)
+        if existing:
+            typer.echo(f"replaced {d.delete_runs_by_trigger('seed')} seed runs")
         try:
             for wl in wf.resolved():
                 for target in wl.pollable_targets:

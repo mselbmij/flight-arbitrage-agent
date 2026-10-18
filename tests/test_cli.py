@@ -7,11 +7,11 @@ from pathlib import Path
 import pytest
 import yaml
 from freezegun import freeze_time
-from src.db import Database
-from src.runner.cli import app
 from typer.testing import CliRunner
 
+from src.db import Database
 from src.models import WatchlistFile
+from src.runner.cli import app
 from tests.conftest import REPO
 
 runner = CliRunner()
@@ -140,6 +140,32 @@ def test_seed_populates_every_pollable_target_of_every_watchlist(tmp_path: Path)
     assert counts["api_calls"] == 30
     assert counts["benchmark_bands"] == 30
     assert 60 <= counts["observations"] <= 90 + 3
+
+
+@freeze_time(NOW)
+def test_seed_refuses_to_run_twice_without_replace(tmp_path: Path):
+    res1, cfg, dbp = seed(tmp_path, days=3)
+    assert res1.exit_code == 0, res1.output
+    res2 = runner.invoke(app, ["seed", "--db", str(dbp), "--config", str(cfg), "--days", "3"])
+    assert res2.exit_code == 1
+    assert "--replace" in res2.output
+    with Database(dbp) as d:
+        assert d.counts()["runs"] == 9  # untouched
+
+
+@freeze_time(NOW)
+def test_seed_replace_is_idempotent(tmp_path: Path):
+    _, cfg, dbp = seed(tmp_path, days=3)
+    with Database(dbp) as d:
+        before = d.counts()
+    res = runner.invoke(
+        app, ["seed", "--db", str(dbp), "--config", str(cfg), "--days", "3", "--replace"]
+    )
+    assert res.exit_code == 0, res.output
+    with Database(dbp) as d:
+        after = d.counts()
+        assert after == before
+        assert d.calls_today() == 0  # seed rows never consume the real budget
 
 
 @freeze_time(NOW)

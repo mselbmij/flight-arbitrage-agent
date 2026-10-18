@@ -8,8 +8,8 @@ from zoneinfo import ZoneInfo
 
 import pytest
 import yaml
-from src.db import Database
 
+from src.db import Database
 from src.models import (
     Alert,
     AlertKind,

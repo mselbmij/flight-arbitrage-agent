@@ -40,10 +40,14 @@ include = ["src*"]
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+extend-exclude = ["*.md"]  # ruff format rewrites fenced code in Markdown; the briefs are prose
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "N", "W"]
 ignore = ["E501"]  # long lines in docstrings / yaml examples
+
+[tool.ruff.lint.isort]
+known-first-party = ["src", "tests"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

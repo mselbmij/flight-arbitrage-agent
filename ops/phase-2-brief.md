@@ -124,7 +124,7 @@ class SeedScenario(BaseModel):            # frozen
 
 def generate(scenario: SeedScenario, *, watchlist: ResolvedWatchlist, run_id_prefix: str = "seed") \
         -> tuple[list[Run], list[ApiCall], list[FareObservation], list[BenchmarkBand]]
-    # One Run + one ApiCall (provider=MOCK, status=ok) per day.
+    # One Run + one ApiCall (provider=MOCK, status=ok, cost_units=0 — never consumes real budget) per day.
     # Each day: 2–3 observations (one nonstop main_cabin, one 1-stop main_cabin cheaper, and on the
     # trap day a basic_economy). Itineraries are built with real-looking Segments (tz-aware local
     # times, 2-letter carriers from a fixed table keyed on origin/destination).
@@ -139,7 +139,7 @@ def generate(scenario: SeedScenario, *, watchlist: ResolvedWatchlist, run_id_pre
 
 ```
 fares migrate [--db PATH]                      → applies migrations, prints versions applied
-fares seed    [--db PATH] [--config PATH] [--days 45] [--end ISO]
+fares seed    [--db PATH] [--config PATH] [--days 45] [--end ISO] [--replace]
                                                → generate() for every pollable target of every
                                                  watchlist in config, insert, print counts
 fares targets [WATCHLIST_ID] [--config PATH] [--db PATH]

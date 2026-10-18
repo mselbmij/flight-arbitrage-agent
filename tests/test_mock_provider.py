@@ -9,9 +9,9 @@ from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
+
 from src.ingestion.base import ProviderError, ProviderResult
 from src.ingestion.mock_client import MockProvider
-
 from src.models import FareBrand, Provider
 from tests.conftest import REPO, TID, load_watchlists
 

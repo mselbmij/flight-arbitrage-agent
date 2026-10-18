@@ -6,9 +6,9 @@ from datetime import UTC, datetime
 
 import pytest
 from freezegun import freeze_time
-from src.runner.seed import SeedScenario, generate
 
 from src.models import ApiCallStatus, FareBrand, Provider
+from src.runner.seed import SeedScenario, generate
 from tests.conftest import TID, WL, thanksgiving
 
 END = datetime(2026, 11, 15, 12, 0, tzinfo=UTC)  # last day is DTD 10; first day is DTD 54
@@ -257,3 +257,19 @@ def test_scenario_defaults():
     sc = scenario()
     assert (sc.days, sc.fence_jump_pct, sc.dip_at_dtd) == (45, 0.18, 34)
     assert (sc.basic_economy_trap_at_dtd, sc.seed) == (30, 7)
+
+
+def test_seeded_api_calls_cost_nothing():
+    """Synthetic history must never consume the real daily budget (ARCHITECTURE §6)."""
+    wl = thanksgiving()
+    scenario = SeedScenario(
+        target=wl.targets[0],
+        days=5,
+        end=END,
+        base_price_cents=30000,
+        typical_low_cents=28000,
+        typical_high_cents=36000,
+    )
+    _, calls, _, _ = generate(scenario, watchlist=wl)
+    assert calls and all(c.cost_units == 0 for c in calls)
+    assert all(c.provider is Provider.MOCK for c in calls)

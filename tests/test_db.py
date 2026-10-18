@@ -8,8 +8,8 @@ from pathlib import Path
 
 import pytest
 from freezegun import freeze_time
-from src.db import BudgetLimits, BudgetTripped, Database
 
+from src.db import BudgetLimits, BudgetTripped, Database
 from src.models import (
     ApiCallStatus,
     FareBrand,

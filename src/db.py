@@ -511,6 +511,29 @@ class Database:
         row = self.con.execute("SELECT * FROM observations WHERE id=?", (obs_id,)).fetchone()
         return None if row is None else _row_to_obs(row)
 
+    def delete_runs_by_trigger(self, trigger: str) -> int:
+        """Remove runs with this trigger and every row that references them
+        (api_calls, observations, benchmark_bands, alerts). Returns runs deleted.
+        Used by `fares seed --replace`."""
+        with self._tx() as con:
+            ids = [
+                r[0] for r in con.execute('SELECT run_id FROM runs WHERE "trigger"=?', (trigger,))
+            ]
+            if not ids:
+                return 0
+            q = ",".join("?" * len(ids))
+            obs_ids = [
+                r[0]
+                for r in con.execute(f"SELECT id FROM observations WHERE run_id IN ({q})", ids)  # noqa: S608
+            ]
+            if obs_ids:
+                oq = ",".join("?" * len(obs_ids))
+                con.execute(f"DELETE FROM alerts WHERE observation_id IN ({oq})", obs_ids)  # noqa: S608
+            for table in ("api_calls", "observations", "benchmark_bands"):
+                con.execute(f"DELETE FROM {table} WHERE run_id IN ({q})", ids)  # noqa: S608
+            con.execute(f"DELETE FROM runs WHERE run_id IN ({q})", ids)  # noqa: S608
+            return len(ids)
+
     def counts(self) -> dict[str, int]:
         return {
             t: self.con.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]  # noqa: S608

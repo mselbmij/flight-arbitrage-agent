@@ -280,6 +280,7 @@ def generate(
                 watchlist_id=watchlist.id,
                 target_id=target.target_id,
                 status=ApiCallStatus.OK,
+                cost_units=0,  # synthetic; must never consume the real daily budget
             )
         )
         lowest = min(o.price_cents for o in day_obs if o.risk and o.risk.passed)
