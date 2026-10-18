@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
@@ -224,7 +225,19 @@ class Database:
         con = sqlite3.connect(self.path, isolation_level=None)
         con.row_factory = sqlite3.Row
         con.execute("PRAGMA busy_timeout=5000")
-        con.execute("PRAGMA journal_mode=WAL")
+        # Switching a fresh file to WAL needs an exclusive lock, and SQLite does not always
+        # consult the busy handler for that pragma. Two connections opening a new DB at the
+        # same moment (first cron run + dashboard) can therefore see "database is locked";
+        # retry briefly instead of failing the whole run.
+        for attempt in range(20):
+            try:
+                con.execute("PRAGMA journal_mode=WAL")
+                break
+            except sqlite3.OperationalError as e:
+                if "locked" not in str(e) or attempt == 19:
+                    con.close()
+                    raise
+                time.sleep(0.05 * (attempt + 1))
         con.execute("PRAGMA foreign_keys=ON")
         self._con = con
         return self
