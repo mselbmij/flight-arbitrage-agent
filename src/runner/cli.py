@@ -16,12 +16,15 @@ from dotenv import load_dotenv
 
 from src.db import BudgetLimits, Database
 from src.models import ResolvedWatchlist, WatchlistFile
+from src.runner.demo import demo_watchlist_file, write_demo_config
 from src.runner.seed import SeedScenario, generate
 
 app = typer.Typer(help="Risk-aware airline fare tracker.", no_args_is_help=True)
 
 DEFAULT_DB = "data/fares.db"
+DEFAULT_SEED_DB = "data/seed.db"
 DEFAULT_CONFIG = "config/watchlists.yaml"
+DEFAULT_DEMO_CONFIG = "config/watchlists.demo.yaml"
 
 DbOpt = Annotated[Path | None, typer.Option("--db", help="SQLite path (default $FARES_DB_PATH).")]
 ConfigOpt = Annotated[
@@ -55,8 +58,19 @@ def migrate(db: DbOpt = None) -> None:
 
 @app.command()
 def seed(
-    db: DbOpt = None,
-    config: ConfigOpt = Path(DEFAULT_CONFIG),
+    db: Annotated[
+        Path | None,
+        typer.Option("--db", help=f"SQLite path (default {DEFAULT_SEED_DB}, NOT $FARES_DB_PATH)."),
+    ] = None,
+    config: Annotated[
+        Path | None,
+        typer.Option(
+            "--config",
+            exists=True,
+            dir_okay=False,
+            help="Watchlist YAML to seed (default: built-in demo watchlists).",
+        ),
+    ] = None,
     days: Annotated[int, typer.Option(min=1, help="Days of history per target.")] = 45,
     end: Annotated[
         str | None, typer.Option(help="ISO timestamp of the last observation (default: now).")
@@ -64,19 +78,45 @@ def seed(
     replace: Annotated[
         bool, typer.Option("--replace", help="Delete existing seed data first.")
     ] = False,
+    write_config: Annotated[
+        Path,
+        typer.Option(help="Where to write the demo watchlists (only when --config is omitted)."),
+    ] = Path(DEFAULT_DEMO_CONFIG),
+    allow_live_db: Annotated[
+        bool,
+        typer.Option("--allow-live-db", help="Seed the live database ($FARES_DB_PATH) anyway."),
+    ] = False,
 ) -> None:
-    """Fill the database with synthetic history for every pollable target.
+    """Fill a SEPARATE database with synthetic history for every pollable target.
 
-    Idempotent with --replace; refuses to run on top of existing seed data without it."""
+    Without --config the demo watchlists are used (departures relative to --end) and written to
+    config/watchlists.demo.yaml (--write-config) so a dashboard can load the pair. The default
+    database is data/seed.db, never the live one: synthetic rows must not become a strike
+    reference. Refuses to write to $FARES_DB_PATH (default data/fares.db) without
+    --allow-live-db. Idempotent with --replace; refuses to run on top of existing seed data
+    without it."""
     end_at = datetime.fromisoformat(end) if end else datetime.now(UTC)
     if end_at.tzinfo is None:
         end_at = end_at.replace(tzinfo=UTC)
     end_at = end_at.astimezone(UTC)
 
-    wf = _load(config)
+    load_dotenv()
+    db_path = db or Path(DEFAULT_SEED_DB)
+    live = Path(os.environ.get("FARES_DB_PATH", DEFAULT_DB))
+    if db_path.resolve() == live.resolve() and not allow_live_db:
+        typer.echo(
+            f"refusing to seed {db_path}: it is the live database ($FARES_DB_PATH). Synthetic "
+            "history there would be read as real prices and become a strike reference. Seed a "
+            "separate file (the default is data/seed.db) or pass --allow-live-db.",
+            err=True,
+        )
+        raise typer.Exit(1)
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+
+    wf = demo_watchlist_file(end_at) if config is None else _load(config)
     totals = {"runs": 0, "api_calls": 0, "observations": 0, "benchmark_bands": 0}
     unbounded = BudgetLimits(max_per_run=10**9, max_per_day=10**9)
-    with _open(db) as d:
+    with Database(db_path) as d:
         d.migrate()
         existing = d.con.execute("SELECT COUNT(*) FROM runs WHERE \"trigger\"='seed'").fetchone()[0]
         if existing and not replace:
@@ -108,10 +148,29 @@ def seed(
         except sqlite3.IntegrityError as e:
             typer.echo(f"seed data already present or inconsistent: {e}", err=True)
             raise typer.Exit(1) from e
+    if config is None:
+        write_demo_config(write_config, wf)
+        typer.echo(f"wrote {write_config}")
     typer.echo("seeded: " + " ".join(f"{k}={v}" for k, v in totals.items()))
 
 
+# Where the generator puts the one-day dip and the Basic Economy trap, in days to departure.
+DIP_DTD = 34
+TRAP_DTD = 30
+
+
 def _scenario(target, wl: ResolvedWatchlist, days: int, end: datetime) -> SeedScenario:
+    """Scenario for one target. The dip and trap are clamped into the DTD range the history
+    covers (dtd_at_end .. dtd_at_end + days - 1): a target far enough out that DTD 34 / 30 are
+    behind it gets them at dtd_at_end + 4 / + 8, so every seeded target has both."""
+    first = (target.depart - end.date()).days  # DTD of the last observation
+    last = first + days - 1  # DTD of the first observation
+
+    def clamp(configured: int, fallback_offset: int) -> int:
+        if first <= configured <= last:
+            return configured
+        return min(first + fallback_offset, last)
+
     base = max(wl.ceiling_cents * 90 // 100, 1)
     return SeedScenario(
         target=target,
@@ -120,6 +179,8 @@ def _scenario(target, wl: ResolvedWatchlist, days: int, end: datetime) -> SeedSc
         base_price_cents=base,
         typical_low_cents=base * 90 // 100,
         typical_high_cents=base * 125 // 100,
+        dip_at_dtd=clamp(DIP_DTD, 4),
+        basic_economy_trap_at_dtd=clamp(TRAP_DTD, 8),
     )
 
 

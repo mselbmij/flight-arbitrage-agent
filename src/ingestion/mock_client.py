@@ -32,23 +32,38 @@ class MockProvider:
         path = self.fixture_dir / (target.target_id.replace(":", "_") + ".json")
         if not path.is_file():
             raise ProviderError(Provider.MOCK, f"no fixture for {target.target_id}")
-        data = json.loads(path.read_text())
-
-        stamp = {
-            "provider": Provider.MOCK.value,
-            "run_id": run_id,
-            "observed_at": observed_at,
-        }
-        observations = [
-            FareObservation.model_validate(
-                {
-                    **o,
-                    **stamp,
-                    "days_to_departure": target.days_to_departure(observed_at),
-                }
+        try:
+            data = json.loads(path.read_text())
+            stamp = {
+                "provider": Provider.MOCK.value,
+                "run_id": run_id,
+                "observed_at": observed_at,
+            }
+            # The fixture is stale data, not authority: identity comes from the requested target,
+            # and the risk verdict is the engine's job, so a fixture can never smuggle one in.
+            identity = {"watchlist_id": target.watchlist_id, "target_id": target.target_id}
+            observations = [
+                FareObservation.model_validate(
+                    {
+                        **o,
+                        **stamp,
+                        **identity,
+                        "risk": None,
+                        "days_to_departure": target.days_to_departure(observed_at),
+                    }
+                )
+                for o in data["observations"]
+            ]
+            band_raw = data.get("band")
+            band = (
+                None
+                if band_raw is None
+                else BenchmarkBand.model_validate({**band_raw, **stamp, **identity})
             )
-            for o in data["observations"]
-        ]
-        band_raw = data.get("band")
-        band = None if band_raw is None else BenchmarkBand.model_validate({**band_raw, **stamp})
-        return ProviderResult(observations=observations, band=band, raw=data.get("raw", {}))
+            # ValueError covers JSONDecodeError, UnicodeDecodeError and pydantic ValidationError
+            result = ProviderResult(observations=observations, band=band, raw=data.get("raw", {}))
+        except (ValueError, KeyError, TypeError, OSError) as e:
+            raise ProviderError(
+                Provider.MOCK, f"bad fixture: {path.name}: {type(e).__name__}", retryable=False
+            ) from e
+        return result

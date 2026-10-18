@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+import threading
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -63,6 +64,36 @@ def test_migrate_applies_initial_then_is_idempotent(db_path: Path):
         second = d.migrate()
     assert len(first) == 1
     assert second == []
+    assert len(sql(db_path, "SELECT version FROM schema_migrations")) == 1
+
+
+def test_migrate_on_two_objects_same_path_second_applies_nothing(db_path: Path):
+    with Database(db_path) as a, Database(db_path) as b:
+        assert len(a.migrate()) == 1
+        assert b.migrate() == []
+    assert len(sql(db_path, "SELECT version FROM schema_migrations")) == 1
+
+
+def test_migrate_race_on_a_fresh_file_neither_raises(db_path: Path):
+    barrier = threading.Barrier(2)
+    results: list[list[str]] = []
+    errors: list[BaseException] = []
+
+    def worker() -> None:
+        try:
+            with Database(db_path) as d:
+                barrier.wait(timeout=10)
+                results.append(d.migrate())
+        except BaseException as e:  # noqa: BLE001 - surfaced by the assertion below
+            errors.append(e)
+
+    threads = [threading.Thread(target=worker) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+    assert errors == []
+    assert sorted(len(r) for r in results) == [0, 1]  # exactly one applied it
     assert len(sql(db_path, "SELECT version FROM schema_migrations")) == 1
 
 
@@ -344,6 +375,23 @@ def test_lowest_seen_ignores_risk_rejected(db: Database):
     assert db.lowest_seen(TID) == 25000
 
 
+def test_lowest_seen_excludes_unverified_brand(db: Database):
+    db.start_run(make_run())
+    unverified = RiskVerdict(passed=True, brand_unverified=True, config_hash="h1")
+    db.insert_observations([
+        make_obs(price=10000, fare_brand=FareBrand.UNKNOWN, risk=unverified),
+        make_obs(price=30000),
+    ])  # fmt: skip
+    assert db.lowest_seen(TID) == 30000
+
+
+def test_lowest_seen_is_none_when_only_unverified_exist(db: Database):
+    db.start_run(make_run())
+    unverified = RiskVerdict(passed=True, brand_unverified=True, config_hash="h1")
+    db.insert_observations([make_obs(price=10000, fare_brand=FareBrand.UNKNOWN, risk=unverified)])
+    assert db.lowest_seen(TID) is None
+
+
 def test_lowest_seen_is_none_when_only_rejected_exist(db: Database):
     db.start_run(make_run())
     db.insert_observations([make_obs(price=20000, passed=False)])
@@ -402,7 +450,8 @@ def test_last_polled_is_max_called_at(db: Database):
 def test_last_polled_ignores_error_and_skipped_rows(db: Database):
     db.start_run(make_run())
     db.reserve_api_call(make_call(at=T0), limits())
-    db.reserve_api_call(make_call(at=T0 + 2 * HOUR, status=ApiCallStatus.ERROR), limits())
+    errored = db.reserve_api_call(make_call(at=T0 + 2 * HOUR), limits())
+    db.complete_api_call(errored, ApiCallStatus.ERROR, 50, "boom")
     with pytest.raises(BudgetTripped):
         db.reserve_api_call(make_call(at=T0 + 3 * HOUR), limits(run=2))
     assert db.last_polled([TID])[TID] == T0
@@ -506,6 +555,57 @@ def test_calls_today_counts_errored_calls(db: Database):
     assert db.calls_today() == 1
 
 
+def test_reserve_forces_status_ok_whatever_the_caller_passed(db: Database, db_path: Path):
+    db.start_run(make_run())
+    cid = db.reserve_api_call(make_call(status=ApiCallStatus.ERROR), limits())
+    assert sql(db_path, "SELECT status FROM api_calls WHERE id=?", cid) == [("ok",)]
+    assert db.calls_today() == 1
+    assert db.last_polled([TID])[TID] == T0
+
+
+def test_two_connections_share_the_day_budget_exactly_once(db_path: Path):
+    with Database(db_path, now=Clock()) as a, Database(db_path, now=Clock()) as b:
+        a.migrate()
+        a.start_run(make_run("r-a"))
+        a.start_run(make_run("r-b"))
+        one = limits(day=1)
+        a.reserve_api_call(make_call("r-a"), one)
+        with pytest.raises(BudgetTripped) as exc:
+            b.reserve_api_call(make_call("r-b"), one)
+        assert exc.value.gate == "day"
+    rows = sql(db_path, "SELECT status FROM api_calls ORDER BY id")
+    assert rows == [("ok",), ("skipped_breaker",)]
+
+
+def test_two_connections_racing_the_day_budget_one_wins(db_path: Path):
+    with Database(db_path, now=Clock()) as d:
+        d.migrate()
+        d.start_run(make_run("r-a"))
+        d.start_run(make_run("r-b"))
+    barrier = threading.Barrier(2)
+    outcomes: list[str] = []
+
+    def worker(run_id: str) -> None:
+        with Database(db_path, now=Clock()) as conn:
+            barrier.wait(timeout=10)
+            try:
+                conn.reserve_api_call(make_call(run_id), limits(day=1))
+                outcomes.append("ok")
+            except BudgetTripped:
+                outcomes.append("tripped")
+
+    threads = [threading.Thread(target=worker, args=(r,)) for r in ("r-a", "r-b")]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+    assert sorted(outcomes) == ["ok", "tripped"]
+    assert sorted(r[0] for r in sql(db_path, "SELECT status FROM api_calls")) == [
+        "ok",
+        "skipped_breaker",
+    ]
+
+
 def test_complete_api_call_updates_status_latency_and_error(db: Database, db_path: Path):
     db.start_run(make_run())
     cid = db.reserve_api_call(make_call(), limits())
@@ -597,6 +697,17 @@ def test_insert_alert_allows_same_key_outside_window(db: Database):
     assert db.counts()["alerts"] == 2
 
 
+def test_insert_alert_exactly_one_window_apart_is_allowed(db: Database):
+    assert db.insert_alert(make_alert("k", T0)) is not None
+    assert db.insert_alert(make_alert("k", T0 + 24 * HOUR)) is not None
+    assert db.counts()["alerts"] == 2
+
+
+def test_insert_alert_one_microsecond_inside_window_is_blocked(db: Database):
+    db.insert_alert(make_alert("k", T0))
+    assert db.insert_alert(make_alert("k", T0 + 24 * HOUR - timedelta(microseconds=1))) is None
+
+
 def test_insert_alert_different_key_inside_window_inserts(db: Database):
     db.insert_alert(make_alert("k1", T0))
     assert db.insert_alert(make_alert("k2", T0 + HOUR)) is not None
@@ -628,5 +739,83 @@ def test_undelivered_alerts_excludes_older_than_max_age(db: Database, clock: Clo
     assert [a.alert_key for a in got] == ["fresh"]
 
 
+def test_undelivered_alerts_exactly_max_age_is_excluded(db: Database, clock: Clock):
+    clock.t = T0 + 24 * HOUR
+    db.insert_alert(make_alert("edge", T0))
+    db.insert_alert(make_alert("inside", T0 + timedelta(microseconds=1)))
+    assert [a.alert_key for a in db.undelivered_alerts(max_age_hours=24)] == ["inside"]
+
+
 def test_undelivered_alerts_empty_on_fresh_db(db: Database):
     assert db.undelivered_alerts(max_age_hours=24) == []
+
+
+# --------------------------------------------------------------------------- #
+# Naive datetimes are rejected at the boundary
+# --------------------------------------------------------------------------- #
+
+NAIVE = datetime(2026, 10, 17, 12, 0)
+
+
+def test_start_run_with_naive_started_at_raises_and_writes_nothing(db: Database):
+    with pytest.raises(ValueError, match="naive datetime"):
+        db.start_run(make_run(started_at=NAIVE))
+    assert db.counts()["runs"] == 0
+
+
+def test_start_run_with_naive_finished_at_raises(db: Database):
+    with pytest.raises(ValueError, match="naive datetime"):
+        db.start_run(make_run(finished_at=NAIVE))
+    assert db.counts()["runs"] == 0
+
+
+def test_reserve_with_naive_called_at_raises_and_writes_nothing(db: Database):
+    db.start_run(make_run())
+    with pytest.raises(ValueError, match="naive datetime"):
+        db.reserve_api_call(make_call(at=NAIVE), limits())
+    assert db.counts()["api_calls"] == 0
+    assert db.get_run("run-1").calls_made == 0
+
+
+def test_insert_observation_with_naive_observed_at_raises(db: Database):
+    db.start_run(make_run())
+    obs = make_obs().model_copy(update={"observed_at": NAIVE})
+    with pytest.raises(ValueError, match="naive datetime"):
+        db.insert_observations([obs])
+    assert db.counts()["observations"] == 0
+
+
+def test_insert_alert_with_naive_created_at_raises(db: Database):
+    with pytest.raises(ValueError, match="naive datetime"):
+        db.insert_alert(make_alert("k", NAIVE))
+    assert db.counts()["alerts"] == 0
+
+
+def test_naive_clock_is_rejected_by_every_clock_reader(db_path: Path):
+    with Database(db_path, now=lambda: NAIVE) as d:
+        with pytest.raises(ValueError, match="naive datetime"):
+            d.migrate()
+    with Database(db_path) as d:
+        d.migrate()
+    with Database(db_path, now=lambda: NAIVE) as d:
+        d.start_run(make_run())
+        with pytest.raises(ValueError, match="naive datetime"):
+            d.calls_today()
+        with pytest.raises(ValueError, match="naive datetime"):
+            d.reserve_api_call(make_call(), limits())
+        with pytest.raises(ValueError, match="naive datetime"):
+            d.finish_run("run-1", "ok")
+        with pytest.raises(ValueError, match="naive datetime"):
+            d.undelivered_alerts(max_age_hours=24)
+        assert d.counts()["api_calls"] == 0
+
+
+def test_mark_delivered_with_naive_clock_raises_and_leaves_alert_undelivered(db_path: Path):
+    with Database(db_path) as d:
+        d.migrate()
+        aid = d.insert_alert(make_alert("k"))
+    with Database(db_path, now=lambda: NAIVE) as d:
+        with pytest.raises(ValueError, match="naive datetime"):
+            d.mark_delivered(aid, "ntfy")
+    with Database(db_path, now=Clock()) as d:
+        assert len(d.undelivered_alerts(max_age_hours=24)) == 1

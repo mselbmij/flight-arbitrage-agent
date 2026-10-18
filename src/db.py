@@ -64,11 +64,16 @@ class BudgetTripped(Exception):  # noqa: N818 - name fixed by the phase-2 brief
 # --------------------------------------------------------------------------- #
 
 
+def _aware(dt: datetime) -> datetime:
+    """Naive datetimes are a bug at the boundary (they would be silently read as UTC)."""
+    if dt.tzinfo is None:
+        raise ValueError("naive datetime")
+    return dt
+
+
 def _ts(dt: datetime) -> str:
     """Instant -> fixed-width UTC ISO text, so text comparison is time comparison."""
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=UTC)
-    return dt.astimezone(UTC).isoformat(timespec="microseconds")
+    return _aware(dt).astimezone(UTC).isoformat(timespec="microseconds")
 
 
 def _ts_or_none(dt: datetime | None) -> str | None:
@@ -187,6 +192,21 @@ def _api_call_params(call: ApiCall, status: ApiCallStatus) -> tuple:
     )
 
 
+def _statements(script: str) -> Iterator[str]:
+    """Split a SQL script into complete statements (trigger bodies stay whole)."""
+    buf = ""
+    for line in script.splitlines(keepends=True):
+        buf += line
+        if sqlite3.complete_statement(buf):
+            if buf.strip():
+                yield buf
+            buf = ""
+    if buf.strip() and not all(
+        ln.strip().startswith("--") or not ln.strip() for ln in buf.splitlines()
+    ):
+        yield buf
+
+
 # --------------------------------------------------------------------------- #
 # Database
 # --------------------------------------------------------------------------- #
@@ -213,6 +233,10 @@ class Database:
         if self._con is not None:
             self._con.close()  # the closed handle is kept so later use raises ProgrammingError
 
+    def _now(self) -> datetime:
+        """The injected clock, validated on every call."""
+        return _aware(self.now())
+
     @property
     def con(self) -> sqlite3.Connection:
         if self._con is None:
@@ -234,31 +258,35 @@ class Database:
     # -- migrations ---------------------------------------------------------- #
 
     def migrate(self) -> list[str]:
+        """Apply pending migrations. Per migration: BEGIN IMMEDIATE, read which versions are
+        applied, apply the script and record it, COMMIT -- so two processes racing on a fresh
+        file serialise on the write lock and the loser finds the version already recorded."""
         con = self.con
-        con.execute(
-            "CREATE TABLE IF NOT EXISTS schema_migrations "
-            "(version TEXT PRIMARY KEY, applied_at TEXT NOT NULL)"
-        )
-        done = {r[0] for r in con.execute("SELECT version FROM schema_migrations")}
         applied: list[str] = []
         for script in sorted(MIGRATIONS_DIR.glob("*.sql")):
             version = script.name.split("_", 1)[0]
-            if version in done:
-                continue
-            stamp = _ts(self.now())
+            stamp = _ts(self._now())
             try:
-                con.executescript(
-                    "BEGIN IMMEDIATE;\n"
-                    f"{script.read_text()}\n"
-                    f"INSERT INTO schema_migrations (version, applied_at) "
-                    f"VALUES ('{version}', '{stamp}');\n"
-                    "COMMIT;"
+                con.execute("BEGIN IMMEDIATE")
+                con.execute(
+                    "CREATE TABLE IF NOT EXISTS schema_migrations "
+                    "(version TEXT PRIMARY KEY, applied_at TEXT NOT NULL)"
                 )
+                done = {r[0] for r in con.execute("SELECT version FROM schema_migrations")}
+                if version not in done:
+                    # executescript() would COMMIT first, so run the statements one by one
+                    for stmt in _statements(script.read_text()):
+                        con.execute(stmt)
+                    con.execute(
+                        "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+                        (version, stamp),
+                    )
+                    applied.append(version)
+                con.execute("COMMIT")
             except BaseException:
                 if con.in_transaction:
                     con.execute("ROLLBACK")
                 raise
-            applied.append(version)
         return applied
 
     # -- runs ---------------------------------------------------------------- #
@@ -283,7 +311,7 @@ class Database:
         with self._tx() as con:
             con.execute(
                 "UPDATE runs SET status=?, error=?, finished_at=? WHERE run_id=?",
-                (status, error, _ts(self.now()), run_id),
+                (status, error, _ts(self._now()), run_id),
             )
 
     def get_run(self, run_id: str) -> Run | None:
@@ -293,10 +321,7 @@ class Database:
     # -- api calls + breaker (section 6) -------------------------------------- #
 
     def _day_start(self) -> datetime:
-        n = self.now()
-        if n.tzinfo is None:
-            n = n.replace(tzinfo=UTC)
-        n = n.astimezone(UTC)
+        n = self._now().astimezone(UTC)
         return n.replace(hour=0, minute=0, second=0, microsecond=0)
 
     def _sum_today(self, con: sqlite3.Connection) -> int:
@@ -308,6 +333,7 @@ class Database:
 
     def reserve_api_call(self, call: ApiCall, limits: BudgetLimits) -> int:
         tripped: BudgetTripped | None = None
+        _ts(call.called_at)  # reject a naive timestamp before anything is written
         with self._tx() as con:
             row = con.execute(
                 "SELECT calls_made FROM runs WHERE run_id=?", (call.run_id,)
@@ -324,7 +350,7 @@ class Database:
                     _INSERT_API_CALL, _api_call_params(call, ApiCallStatus.SKIPPED_BREAKER)
                 )
             else:
-                cur = con.execute(_INSERT_API_CALL, _api_call_params(call, call.status))
+                cur = con.execute(_INSERT_API_CALL, _api_call_params(call, ApiCallStatus.OK))
                 con.execute(
                     "UPDATE runs SET calls_made = calls_made + 1 WHERE run_id=?", (call.run_id,)
                 )
@@ -429,8 +455,11 @@ class Database:
         return [_row_to_obs(r) for r in self.con.execute(sql, args)]
 
     def lowest_seen(self, target_id: str) -> int | None:
+        # an unverified brand (FareBrand.UNKNOWN) passes the risk rules but is never a strike
+        # reference: it might be Basic Economy
         return self.con.execute(
-            "SELECT MIN(price_cents) FROM observations WHERE target_id=? AND risk_passed = 1",
+            "SELECT MIN(price_cents) FROM observations WHERE target_id=? AND risk_passed = 1 "
+            "AND COALESCE(risk_brand_unverified, 0) = 0",
             (target_id,),
         ).fetchone()[0]
 
@@ -459,7 +488,10 @@ class Database:
     # -- alerts ---------------------------------------------------------------- #
 
     def insert_alert(self, alert: Alert, *, dedup_window_hours: int = 24) -> int | None:
+        created = _ts(alert.created_at)
         window_start = _ts(alert.created_at - timedelta(hours=dedup_window_hours))
+        if alert.delivered_at is not None:
+            _ts(alert.delivered_at)
         with self._tx() as con:
             dup = con.execute(
                 "SELECT 1 FROM alerts WHERE alert_key=? AND created_at > ? LIMIT 1",
@@ -472,7 +504,7 @@ class Database:
                 "observation_id, itinerary_key, price_cents, reference_cents, message, "
                 "alert_key, delivered_at, channel) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
-                    _ts(alert.created_at),
+                    created,
                     alert.watchlist_id,
                     alert.target_id,
                     alert.kind.value,
@@ -493,13 +525,13 @@ class Database:
         with self._tx() as con:
             con.execute(
                 "UPDATE alerts SET delivered_at=?, channel=? WHERE id=?",
-                (_ts(self.now()), channel, alert_id),
+                (_ts(self._now()), channel, alert_id),
             )
 
     def undelivered_alerts(self, *, max_age_hours: int) -> list[Alert]:
-        oldest = _ts(self.now() - timedelta(hours=max_age_hours))
+        oldest = _ts(self._now() - timedelta(hours=max_age_hours))
         rows = self.con.execute(
-            "SELECT * FROM alerts WHERE delivered_at IS NULL AND created_at >= ? "
+            "SELECT * FROM alerts WHERE delivered_at IS NULL AND created_at > ? "
             "ORDER BY created_at, id",
             (oldest,),
         )
