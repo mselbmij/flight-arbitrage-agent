@@ -1425,3 +1425,37 @@ def test_click_is_none_for_alerts_without_an_observation(h: Harness):
     [tripped] = h.alerts(AlertKind.BUDGET_TRIPPED)
     assert tripped["observation_id"] is None
     assert h.notifier.clicks == ["https://book.example/1553", None]  # BUY, then BUDGET_TRIPPED
+
+
+def test_a_raising_notifier_during_retry_does_not_stop_the_run(tmp_path, caplog):
+    """A broken notifier must never prevent polling (ARCHITECTURE §7a retry rule)."""
+    import logging
+    from datetime import UTC, datetime, timedelta
+
+    from src.db import Database
+    from src.models import Alert, AlertKind, Regime
+    from src.runner.poll import _retry_undelivered
+
+    class Boom:
+        def send(self, alert, *, click=None):
+            raise RuntimeError("ntfy exploded")
+
+    db_path = tmp_path / "r.db"
+    with Database(db_path) as db:
+        db.migrate()
+        now = datetime.now(UTC)
+        aid = db.insert_alert(
+            Alert(
+                created_at=now - timedelta(hours=1),
+                watchlist_id="w-x",
+                kind=AlertKind.BUY,
+                regime=Regime.PRIME,
+                message="BUY\nbody",
+                alert_key="w-x:buy:-:0",
+            )
+        )
+        assert aid is not None
+        with caplog.at_level(logging.ERROR):
+            _retry_undelivered(db, Boom())
+        assert "leaving it undelivered" in caplog.text
+        assert db.undelivered_alerts(max_age_hours=24)[0].id == aid

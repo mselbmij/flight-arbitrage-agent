@@ -9,7 +9,7 @@ Read `ARCHITECTURE.md` first. It is the contract; the code follows it.
 
 ## Status
 
-Phase 1 (schema + contract) done. Nothing runs yet. See ARCHITECTURE.md §9 for the plan.
+Phases 1–6 done: schema, DB + breaker, dashboard, providers + risk filter, rules + runner, ntfy alerts + cron scripts. Nothing has run against a live API yet; see Ops below for the go-live order. ARCHITECTURE.md §9 has the phase plan.
 
 ## Setup
 

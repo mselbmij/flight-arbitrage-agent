@@ -154,7 +154,11 @@ def _retry_undelivered(db: Database, notifier: Notifier) -> None:
     """Section 7a: give alerts whose delivery failed earlier one more chance, then give up."""
     for alert in db.undelivered_alerts(max_age_hours=RETRY_WINDOW_HOURS):
         assert alert.id is not None
-        channel = notifier.send(alert, click=_click_for(db, alert))
+        try:
+            channel = notifier.send(alert, click=_click_for(db, alert))
+        except Exception:  # a broken notifier must not stop the poll from running
+            log.exception("retry of alert %s raised; leaving it undelivered", alert.id)
+            continue
         if channel:
             db.mark_delivered(alert.id, channel)
     stale = len(db.undelivered_alerts(max_age_hours=_ANCIENT_HOURS)) - len(
