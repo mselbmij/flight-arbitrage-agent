@@ -228,8 +228,17 @@ leave the ledger row `ok` and crash the run. Clients never pre-fill `risk` — t
 `risk_filters.py` — and always stamp `watchlist_id`/`target_id` from the requested target. The runner, not the
 client, logs the `ApiCall` and consults the breaker.
 
-* **SerpAPI (Google Flights).** Primary. Supplies the benchmark band (`price_insights`). Brand
-  detection is best-effort from extension strings; expect `UNKNOWN` often → the band is still used.
+* **SerpAPI (Google Flights).** Primary. Supplies the benchmark band (`price_insights`). We send
+  `exclude_basic=true` whenever the watchlist disallows Basic Economy (Google filters at the
+  source; returned fares are stored as `MAIN_CABIN` / `google:exclude_basic`). Without that filter
+  brand detection is best-effort from extension strings and `UNKNOWN` is common. **Round trips
+  return outbound legs only** — the return legs cost a second call via `departure_token`, which the
+  free tier can't spare — so a SerpAPI round-trip observation has a one-slice itinerary and a
+  round-trip total price. Its `itinerary_key` therefore differs from an Amadeus key for the same
+  flights; cross-provider joins are per-slice work for a later phase.
+* Segment times from every provider are local wall-clock with no offset; `src/ingestion/airports.py`
+  localizes them via the `airportsdata` IATA→IANA table. An unknown airport skips that itinerary
+  (counted in `raw["_skipped_unknown_airport"]`), never the whole call.
 * **Amadeus Self-Service.** Second price source with `fareBasis`/branded-fare detail. `AMADEUS_HOST=test`
   returns fake prices and **must** be stored with `provider=mock`, never `amadeus`.
 * **Mock.** Reads `tests/fixtures/*.json`. Used by the seeder and all unit tests.
@@ -268,6 +277,11 @@ Inside one run, for each watchlist with status `watching`:
    (`MAX(api_calls.called_at) GROUP BY target_id`, nulls first), then by DTD ascending so
    near-departure targets never starve. One exact-date call per provider per target.
 3. `status=purchased`: only `purchase.target_id`, every run, regardless of `targets_per_run`.
+
+**Providers and the breaker.** Every call to any provider is one unit under the single breaker;
+adding `amadeus` to a watchlist's `providers` doubles that watchlist's calls. Amadeus's free
+production quota is separate from SerpAPI's; a per-provider breaker is a Phase 5 option if it is
+turned on.
 
 **Budget arithmetic.** `fares budget` prints `WatchlistFile.calls_per_day()` next to
 `MAX_DAILY_API_CALLS`. A grid of *N* targets at `targets_per_run = k`, `times_per_day = 2`
@@ -344,7 +358,7 @@ Three views, per watchlist:
 | 1 | this doc, `models.py`, `watchlists.yaml`, `pyproject.toml`, agent files | orchestrator | — |
 | 2 | `db.py` (schema, migrations, breaker), `fares seed`, mock provider, fixtures | TESTER → BUILDER → JANITOR | yes |
 | 3 | `dashboard/app.py` against seeded data | BUILDER → JANITOR | no |
-| 4 | `serpapi_client.py`, `amadeus_client.py`, `risk_filters.py` | TESTER → 2× BUILDER (parallel) → JANITOR | yes |
+| 4 | `airports.py`, `serpapi_client.py`, `amadeus_client.py`, `risk_filters.py` | TESTER → 3× BUILDER (parallel worktrees) → JANITOR | yes |
 | 5 | `rules.py` (regimes, strikes, post-purchase), `fares poll` end-to-end on mock | TESTER → BUILDER → JANITOR | yes |
 | 6 | `notifier.py` (ntfy), `fares alert-test`, cron + backup scripts, first live run with real keys | BUILDER → JANITOR | no |
 | 7? | internal statistics, only if ≥ 90 days of data across ≥ 3 routes says they add signal | ARCHITECT decides | yes |
