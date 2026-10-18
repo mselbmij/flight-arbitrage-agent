@@ -392,3 +392,23 @@ def test_apply_matches_risk_verdict():
     o = obs(one_stop(200), brand=FareBrand.UNKNOWN)
     (out,) = apply([o], thanksgiving(), config_hash=HASH)
     assert out.risk == risk_verdict(o, thanksgiving(), config_hash=HASH)
+
+
+def test_round_trip_target_with_outbound_only_itinerary_is_flagged_inbound_unverified():
+    """SerpAPI round trips carry one slice (ARCHITECTURE §5); the verdict must say so."""
+    from src.engine.risk_filters import risk_verdict
+    from src.models import Itinerary
+    from tests.conftest import make_obs, thanksgiving
+
+    wl = thanksgiving()  # round trip
+    target = wl.targets[0]
+    full = make_obs(target_id=target.target_id, watchlist_id=wl.id)
+    assert len(full.itinerary.slices) == 2
+    assert risk_verdict(full, wl, config_hash="h").inbound_unverified is False
+
+    outbound_only = full.model_copy(
+        update={"itinerary": Itinerary(slices=[full.itinerary.slices[0]])}
+    )
+    v = risk_verdict(outbound_only, wl, config_hash="h")
+    assert v.inbound_unverified is True
+    assert v.passed is True  # it is a flag, not a rejection

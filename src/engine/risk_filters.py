@@ -12,6 +12,8 @@ from src.models import FareBrand, FareObservation, ResolvedWatchlist, RiskVerdic
 def risk_verdict(obs: FareObservation, wl: ResolvedWatchlist, *, config_hash: str) -> RiskVerdict:
     c = wl.constraints
     slices = obs.itinerary.slices
+    target = next((t for t in wl.targets if t.target_id == obs.target_id), None)
+    inbound_unverified = bool(target and target.is_round_trip and len(slices) == 1)
     rejections: list[str] = []
 
     if obs.fare_brand is FareBrand.BASIC_ECONOMY and not c.allow_basic_economy:
@@ -40,6 +42,7 @@ def risk_verdict(obs: FareObservation, wl: ResolvedWatchlist, *, config_hash: st
         passed=not rejections,
         rejections=rejections,
         brand_unverified=obs.fare_brand is FareBrand.UNKNOWN,
+        inbound_unverified=inbound_unverified,
         config_hash=config_hash,
     )
 

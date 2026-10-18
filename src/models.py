@@ -706,6 +706,9 @@ class RiskVerdict(BaseModel):
     passed: bool
     rejections: list[str] = Field(default_factory=list)  # e.g. "basic_economy", "layover>180"
     brand_unverified: bool = False  # FareBrand.UNKNOWN — passes but cannot BUY alone
+    #: Round-trip target but the itinerary holds only the outbound slice (SerpAPI RT searches
+    #: return outbound legs only). Passes, but a BUY is prefixed "[return not checked]".
+    inbound_unverified: bool = False
     config_hash: str
 
 

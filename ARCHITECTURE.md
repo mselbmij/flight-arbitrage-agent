@@ -171,7 +171,11 @@ Rules the engine must honour:
 
 * A `BUY` alert requires `risk.passed` **and** `not risk.brand_unverified`. An unverified-brand
   fare in the strike zone produces a `BUY` with the message prefixed `[brand unverified]` only
-  when `fare_brand_raw` is non-null; otherwise no alert.
+  when `fare_brand_raw` is non-null; otherwise no alert. A row with `risk.inbound_unverified`
+  (SerpAPI round trip, outbound slice only) gets the prefix `[return not checked]`; both prefixes
+  may stack.
+* One alert per target per run: among qualifying observations the cheapest wins. Five fares in
+  the strike zone are one BUY, not five.
 * `ceiling_cents` is an absolute strike in every regime: price ≤ ceiling always alerts.
 * The strike reference `lowest_seen` is the min `price_cents` of **risk-passed** observations
   with a **verified brand** (`risk_brand_unverified = 0`) for that **target**, provider-independent.
@@ -379,12 +383,11 @@ Three views, per watchlist:
 Branch per phase (`phase-N-<slug>`), PR into `main`, CI green + REVIEWER pass before merge on the
 phases marked yes.
 
-**Phase 5 entry gate (ARCHITECT decision, schema change):** a SerpAPI round-trip observation has a
-one-slice itinerary and a round-trip price; today only `raw["_note"]` says so, and the rules engine
-never reads `data/raw/`. The stored row must carry it — proposed `RiskVerdict.inbound_unverified:
-bool` (set by the engine when `target.is_round_trip and len(itinerary.slices) == 1`), with §3
-amended so a BUY on such a row is prefixed `[return not checked]` the way unverified brands are.
-Migration: one nullable column, no backfill.
+**Phase 5 entry gate (resolved):** `RiskVerdict.inbound_unverified` (migration `002`, one nullable
+column, no backfill) is set by `risk_filters` when `target.is_round_trip and len(itinerary.slices)
+== 1`. §3: a BUY on such a row is prefixed `[return not checked]`. Decided by the orchestrator
+rather than the architect because a nullable add is a two-way door (architect role file, "what
+counts as a one-way door").
 
 ## 10. Risk matrix (what can go wrong, what stops it)
 

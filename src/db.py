@@ -112,6 +112,7 @@ def _row_to_obs(r: sqlite3.Row) -> FareObservation:
             passed=bool(r["risk_passed"]),
             rejections=json.loads(r["risk_rejections_json"] or "[]"),
             brand_unverified=bool(r["risk_brand_unverified"]),
+            inbound_unverified=bool(r["risk_inbound_unverified"]),
             config_hash=r["risk_config_hash"],
         )
     return FareObservation(
@@ -401,8 +402,9 @@ class Database:
                     "run_id, itinerary_key, itinerary_json, price_cents, currency, fare_brand, "
                     "fare_brand_raw, changeable, refundable, carry_on_included, seats_remaining, "
                     "days_to_departure, booking_url, raw_payload_ref, risk_passed, "
-                    "risk_rejections_json, risk_brand_unverified, risk_config_hash) "
-                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "risk_rejections_json, risk_brand_unverified, risk_inbound_unverified, "
+                    "risk_config_hash) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (
                         o.watchlist_id,
                         o.target_id,
@@ -425,6 +427,7 @@ class Database:
                         None if r is None else int(r.passed),
                         None if r is None else json.dumps(r.rejections),
                         None if r is None else int(r.brand_unverified),
+                        None if r is None else int(r.inbound_unverified),
                         None if r is None else r.config_hash,
                     ),
                 )

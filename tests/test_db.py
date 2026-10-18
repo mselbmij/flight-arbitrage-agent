@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 from freezegun import freeze_time
 
-from src.db import BudgetLimits, BudgetTripped, Database
+from src.db import MIGRATIONS_DIR, BudgetLimits, BudgetTripped, Database
 from src.models import (
     ApiCallStatus,
     FareBrand,
@@ -58,20 +58,44 @@ def limits(run: int = 10, day: int = 100) -> BudgetLimits:
 # --------------------------------------------------------------------------- #
 
 
-def test_migrate_applies_initial_then_is_idempotent(db_path: Path):
+N_MIGRATIONS = len(list(MIGRATIONS_DIR.glob("*.sql")))
+
+
+def test_migrate_applies_all_scripts_then_is_idempotent(db_path: Path):
     with Database(db_path) as d:
         first = d.migrate()
         second = d.migrate()
-    assert len(first) == 1
+    assert len(first) == N_MIGRATIONS >= 2
+    assert first == sorted(first)  # applied in version order
     assert second == []
-    assert len(sql(db_path, "SELECT version FROM schema_migrations")) == 1
+    assert len(sql(db_path, "SELECT version FROM schema_migrations")) == N_MIGRATIONS
 
 
 def test_migrate_on_two_objects_same_path_second_applies_nothing(db_path: Path):
     with Database(db_path) as a, Database(db_path) as b:
-        assert len(a.migrate()) == 1
+        assert len(a.migrate()) == N_MIGRATIONS
         assert b.migrate() == []
-    assert len(sql(db_path, "SELECT version FROM schema_migrations")) == 1
+    assert len(sql(db_path, "SELECT version FROM schema_migrations")) == N_MIGRATIONS
+
+
+def test_migrate_upgrades_a_v001_database_in_place(db_path: Path):
+    """A DB created before 002 gains the new column without losing rows."""
+    import sqlite3
+
+    con = sqlite3.connect(db_path)
+    con.executescript((MIGRATIONS_DIR / "001_initial.sql").read_text())
+    con.execute("INSERT INTO schema_migrations (version, applied_at) VALUES ('001', 'x')")
+    con.commit()
+    con.close()
+    with Database(db_path) as d:
+        applied = d.migrate()
+    assert applied == [
+        v
+        for v in sorted(p.name.split("_", 1)[0] for p in MIGRATIONS_DIR.glob("*.sql"))
+        if v != "001"
+    ]
+    cols = {r[1] for r in sql(db_path, "PRAGMA table_info(observations)")}
+    assert "risk_inbound_unverified" in cols
 
 
 def test_migrate_race_on_a_fresh_file_neither_raises(db_path: Path):
@@ -93,8 +117,8 @@ def test_migrate_race_on_a_fresh_file_neither_raises(db_path: Path):
     for t in threads:
         t.join(timeout=30)
     assert errors == []
-    assert sorted(len(r) for r in results) == [0, 1]  # exactly one applied it
-    assert len(sql(db_path, "SELECT version FROM schema_migrations")) == 1
+    assert sorted(len(r) for r in results) == [0, N_MIGRATIONS]  # exactly one applied them
+    assert len(sql(db_path, "SELECT version FROM schema_migrations")) == N_MIGRATIONS
 
 
 def test_migrate_creates_all_tables(db: Database, db_path: Path):
