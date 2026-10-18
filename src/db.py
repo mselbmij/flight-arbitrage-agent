@@ -537,6 +537,12 @@ class Database:
             )
             return cur.lastrowid
 
+    def alert_kinds_for(self, target_id: str) -> set[AlertKind]:
+        """Distinct kinds ever inserted for this target, of any age. Watchlist-level alerts
+        (target_id NULL) are not included. Gates FENCE_WARNING and DOT_24H (once per target)."""
+        rows = self.con.execute("SELECT DISTINCT kind FROM alerts WHERE target_id=?", (target_id,))
+        return {AlertKind(r[0]) for r in rows}
+
     def mark_delivered(self, alert_id: int, channel: str) -> None:
         with self._tx() as con:
             con.execute(

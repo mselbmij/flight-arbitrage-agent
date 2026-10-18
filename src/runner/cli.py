@@ -7,6 +7,7 @@ database applies migrations first.
 import os
 import sqlite3
 from datetime import UTC, datetime
+from enum import StrEnum
 from pathlib import Path
 from typing import Annotated
 
@@ -14,9 +15,14 @@ import typer
 import yaml
 from dotenv import load_dotenv
 
-from src.db import BudgetLimits, Database
-from src.models import ResolvedWatchlist, WatchlistFile
+from src.db import BudgetLimits, Database, utcnow
+from src.engine.rules import fmt_money
+from src.ingestion.amadeus_client import AmadeusProvider
+from src.ingestion.mock_client import MockProvider
+from src.ingestion.serpapi_client import SerpApiProvider
+from src.models import Provider, ResolvedWatchlist, WatchlistFile
 from src.runner.demo import demo_watchlist_file, write_demo_config
+from src.runner.poll import NullNotifier, ProviderRegistry, run_poll
 from src.runner.seed import SeedScenario, generate
 
 app = typer.Typer(help="Risk-aware airline fare tracker.", no_args_is_help=True)
@@ -25,6 +31,7 @@ DEFAULT_DB = "data/fares.db"
 DEFAULT_SEED_DB = "data/seed.db"
 DEFAULT_CONFIG = "config/watchlists.yaml"
 DEFAULT_DEMO_CONFIG = "config/watchlists.demo.yaml"
+DEFAULT_RAW_DIR = "data/raw"
 
 DbOpt = Annotated[Path | None, typer.Option("--db", help="SQLite path (default $FARES_DB_PATH).")]
 ConfigOpt = Annotated[
@@ -206,6 +213,172 @@ def targets(
             lp = polled[t.target_id]
             stamp = lp.strftime("%Y-%m-%d %H:%M") if lp else "-"
             typer.echo(f"{t.target_id}  {w.regime_for(t).value}  {t.days_to_departure()}  {stamp}")
+
+
+class Trigger(StrEnum):
+    CRON = "cron"
+    MANUAL = "manual"
+
+
+def _registry_from_env() -> ProviderRegistry:
+    providers: dict[Provider, object] = {}
+    if key := os.environ.get("SERPAPI_KEY"):
+        providers[Provider.SERPAPI] = SerpApiProvider(key)
+    client_id = os.environ.get("AMADEUS_CLIENT_ID")
+    client_secret = os.environ.get("AMADEUS_CLIENT_SECRET")
+    if client_id and client_secret:
+        host = os.environ.get("AMADEUS_HOST")
+        extra = {"host": host} if host else {}
+        providers[Provider.AMADEUS] = AmadeusProvider(client_id, client_secret, **extra)
+    return ProviderRegistry(providers)  # type: ignore[arg-type]
+
+
+def _with_mock_only(wf: WatchlistFile) -> WatchlistFile:
+    """Every watchlist polls [mock] and nothing else."""
+    watchlists = [
+        w.model_copy(
+            update={
+                "poll": (w.poll or wf.defaults.poll).model_copy(
+                    update={"providers": [Provider.MOCK]}
+                )
+            }
+        )
+        for w in wf.watchlists
+    ]
+    return wf.model_copy(update={"watchlists": watchlists})
+
+
+@app.command()
+def poll(
+    db: DbOpt = None,
+    config: ConfigOpt = Path(DEFAULT_CONFIG),
+    trigger: Annotated[Trigger, typer.Option(help="Recorded on the run.")] = Trigger.MANUAL,
+    provider_override: Annotated[
+        str | None,
+        typer.Option(
+            "--provider-override",
+            help="Replace every watchlist's providers. Only 'mock' (needs --fixtures).",
+        ),
+    ] = None,
+    fixtures: Annotated[
+        Path | None,
+        typer.Option("--fixtures", exists=True, file_okay=False, help="Mock fixture directory."),
+    ] = None,
+    raw_dir: Annotated[
+        Path, typer.Option("--raw-dir", help="Where raw provider payloads are written.")
+    ] = Path(DEFAULT_RAW_DIR),
+    allow_live_db: Annotated[
+        bool,
+        typer.Option(
+            "--allow-live-db", help="With --provider-override, poll the live database anyway."
+        ),
+    ] = False,
+) -> None:
+    """Run one poll: every pollable target, every provider, risk filters, rules, alerts.
+
+    Exit 0 ok, 2 budget tripped, 1 error. --provider-override mock still spends the breaker, so
+    it refuses the live database ($FARES_DB_PATH) without --allow-live-db: mock rows there would
+    become a strike reference."""
+    load_dotenv()
+    if provider_override is not None and provider_override != "mock":
+        raise typer.BadParameter("only 'mock' is supported", param_hint="--provider-override")
+    if provider_override is not None and fixtures is None:
+        raise typer.BadParameter("--provider-override mock needs --fixtures DIR")
+
+    live = Path(os.environ.get("FARES_DB_PATH", DEFAULT_DB))
+    db_path = db or live
+    if provider_override and db_path.resolve() == live.resolve() and not allow_live_db:
+        typer.echo(
+            f"refusing to poll {db_path} with --provider-override: it is the live database "
+            "($FARES_DB_PATH) and mock prices there would be read as real. Use a scratch "
+            "database (--db) or pass --allow-live-db.",
+            err=True,
+        )
+        raise typer.Exit(1)
+
+    wf = _load(config)
+    if provider_override is not None:
+        assert fixtures is not None
+        wf = _with_mock_only(wf)
+        registry = ProviderRegistry({Provider.MOCK: MockProvider(fixtures)})
+    else:
+        registry = _registry_from_env()
+    limits = BudgetLimits(
+        max_per_run=int(os.environ.get("MAX_CALLS_PER_RUN", "2")),
+        max_per_day=int(os.environ.get("MAX_DAILY_API_CALLS", "3")),
+    )
+
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    with Database(db_path) as d:
+        try:
+            run = run_poll(
+                d,
+                wf,
+                registry,
+                limits=limits,
+                notifier=NullNotifier(),
+                raw_dir=raw_dir,
+                trigger=trigger.value,  # type: ignore[arg-type]
+                now=utcnow,
+            )
+        except Exception as e:  # run_poll has already marked the run errored
+            typer.echo(f"error: {e!r}", err=True)
+            raise typer.Exit(1) from e
+        _print_poll_summary(d, run.run_id)
+        status = run.status
+    if status == "budget_tripped":
+        raise typer.Exit(2)
+
+
+def _print_poll_summary(d: Database, run_id: str) -> None:
+    run = d.get_run(run_id)
+    assert run is not None
+    started = run.started_at.astimezone(UTC).isoformat(timespec="microseconds")
+
+    def scalar(sql: str, *args: object) -> int:
+        return d.con.execute(sql, args).fetchone()[0]
+
+    n_obs = scalar("SELECT COUNT(*) FROM observations WHERE run_id=?", run_id)
+    n_alerts = scalar("SELECT COUNT(*) FROM alerts WHERE created_at >= ?", started)
+    n_sent = scalar(
+        "SELECT COUNT(*) FROM alerts WHERE created_at >= ? AND delivered_at IS NOT NULL", started
+    )
+    typer.echo(f"run: {run.run_id}")
+    typer.echo(f"status: {run.status}")
+    typer.echo(f"calls: {run.calls_made}")
+    typer.echo(f"observations: {n_obs} inserted")
+    typer.echo(f"alerts: {n_alerts} inserted, {n_sent} delivered")
+    targets = d.con.execute(
+        "SELECT DISTINCT target_id FROM api_calls WHERE run_id=? AND status != 'skipped_breaker' "
+        "AND target_id IS NOT NULL ORDER BY id",
+        (run_id,),
+    ).fetchall()
+    for (tid,) in targets:
+        total = scalar(
+            "SELECT COUNT(*) FROM observations WHERE run_id=? AND target_id=?", run_id, tid
+        )
+        passed = scalar(
+            "SELECT COUNT(*) FROM observations WHERE run_id=? AND target_id=? AND risk_passed=1",
+            run_id,
+            tid,
+        )
+        cheapest = d.con.execute(
+            "SELECT MIN(price_cents) FROM observations "
+            "WHERE run_id=? AND target_id=? AND risk_passed=1",
+            (run_id, tid),
+        ).fetchone()[0]
+        kinds = [
+            r[0]
+            for r in d.con.execute(
+                "SELECT kind FROM alerts WHERE target_id=? AND created_at >= ? ORDER BY id",
+                (tid, started),
+            )
+        ]
+        typer.echo(
+            f"  {tid}  obs={total} passed={passed} "
+            f"cheapest={'-' if cheapest is None else fmt_money(cheapest)} "
+            f"alerts={','.join(kinds) or '-'}"
+        )
 
 
 @app.command()

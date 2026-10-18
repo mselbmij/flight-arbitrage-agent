@@ -64,6 +64,9 @@ class Database:
         # None (no insert) if an alert with the same alert_key has created_at > new.created_at -
         # window (strict: exactly one window apart is allowed).
         # alerts.alert_key is NOT unique across time (ARCHITECTURE §3); dedup is enforced here.
+    def alert_kinds_for(self, target_id: str) -> set[AlertKind]
+        # distinct kinds ever inserted for this target_id, of any age; watchlist-level alerts
+        # (target_id NULL) are excluded. Added in phase 5: gates FENCE_WARNING / DOT_24H.
     def mark_delivered(self, alert_id: int, channel: str) -> None
     def undelivered_alerts(self, *, max_age_hours: int) -> list[Alert]
         # created_at > now - max_age (strict, the same shape as the dedup window)
