@@ -3,8 +3,9 @@ name = "flight-arbitrage-agent"
 version = "0.1.0"
 description = "Risk-aware airline fare tracker: watch routes, reject trap fares, alert in the buy window, harvest post-purchase credits."
 readme = "README.md"
+classifiers = ["License :: OSI Approved :: GNU Affero General Public License v3"]
 requires-python = ">=3.11"
-license = { text = "MIT" }
+license = { text = "AGPL-3.0-only" }
 dependencies = [
     "pydantic>=2.7,<3",
     "pyyaml>=6.0",

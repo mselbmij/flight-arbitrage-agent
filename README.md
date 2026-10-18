@@ -118,3 +118,7 @@ bought.
 
 3. From the next run on, only that target is polled (first, every run) and the engine alerts on
    `CREDIT_DROP` and `DOT_24H`.
+
+## License
+
+GNU Affero General Public License v3.0 (`AGPL-3.0-only`). Modified versions must publish their source, including when run as a network service. See `LICENSE`.
