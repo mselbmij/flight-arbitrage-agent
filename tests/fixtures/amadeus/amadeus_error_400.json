@@ -1,0 +1,14 @@
+{
+  "errors": [
+    {
+      "status": 400,
+      "code": 477,
+      "title": "INVALID FORMAT",
+      "detail": "Invalid date format: departureDate must be YYYY-MM-DD",
+      "source": {
+        "parameter": "departureDate",
+        "example": "2026-11-25"
+      }
+    }
+  ]
+}

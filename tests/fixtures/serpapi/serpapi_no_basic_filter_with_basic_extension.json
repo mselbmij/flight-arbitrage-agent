@@ -1,0 +1,138 @@
+{
+  "search_metadata": {
+    "id": "fx-no-filter",
+    "status": "Success",
+    "created_at": "2026-10-17 12:00:01 UTC",
+    "processed_at": "2026-10-17 12:00:03 UTC",
+    "google_flights_url": "https://www.google.com/travel/flights?q=fixture-fx-no-filter",
+    "raw_html_file": "https://serpapi.com/searches/fx-no-filter.html",
+    "total_time_taken": 2.1
+  },
+  "search_parameters": {
+    "engine": "google_flights",
+    "hl": "en",
+    "gl": "us",
+    "departure_id": "SEA",
+    "arrival_id": "SJC",
+    "outbound_date": "2026-11-25",
+    "return_date": "2026-11-29",
+    "travel_class": "1",
+    "currency": "USD"
+  },
+  "best_flights": [
+    {
+      "flights": [
+        {
+          "departure_airport": {
+            "name": "SEA airport",
+            "id": "SEA",
+            "time": "2026-11-25 10:05"
+          },
+          "arrival_airport": {
+            "name": "SJC airport",
+            "id": "SJC",
+            "time": "2026-11-25 12:20"
+          },
+          "duration": 135,
+          "airplane": "Airbus A321",
+          "airline": "Delta",
+          "airline_logo": "https://www.gstatic.com/flights/airline_logos/70px/DL.png",
+          "travel_class": "Economy",
+          "flight_number": "DL 2540",
+          "legroom": "30 in",
+          "extensions": [
+            "Average legroom (30 in)"
+          ]
+        }
+      ],
+      "total_duration": 135,
+      "carbon_emissions": {
+        "this_flight": 180000,
+        "typical_for_this_route": 190000,
+        "difference_percent": -5
+      },
+      "price": 249,
+      "type": "Round trip",
+      "airline_logo": "https://www.gstatic.com/flights/airline_logos/70px/multi.png",
+      "departure_token": "tok-249-135"
+    }
+  ],
+  "other_flights": [
+    {
+      "flights": [
+        {
+          "departure_airport": {
+            "name": "SEA airport",
+            "id": "SEA",
+            "time": "2026-11-25 07:15"
+          },
+          "arrival_airport": {
+            "name": "SJC airport",
+            "id": "SJC",
+            "time": "2026-11-25 09:25"
+          },
+          "duration": 130,
+          "airplane": "Boeing 737",
+          "airline": "Alaska",
+          "airline_logo": "https://www.gstatic.com/flights/airline_logos/70px/AS.png",
+          "travel_class": "Economy",
+          "flight_number": "AS 327",
+          "legroom": "30 in",
+          "extensions": [
+            "Average legroom (30 in)"
+          ]
+        }
+      ],
+      "total_duration": 130,
+      "carbon_emissions": {
+        "this_flight": 180000,
+        "typical_for_this_route": 190000,
+        "difference_percent": -5
+      },
+      "price": 129,
+      "type": "Round trip",
+      "airline_logo": "https://www.gstatic.com/flights/airline_logos/70px/multi.png",
+      "departure_token": "tok-129-130",
+      "extensions": [
+        "Basic Economy"
+      ]
+    },
+    {
+      "flights": [
+        {
+          "departure_airport": {
+            "name": "SEA airport",
+            "id": "SEA",
+            "time": "2026-11-25 13:30"
+          },
+          "arrival_airport": {
+            "name": "SJC airport",
+            "id": "SJC",
+            "time": "2026-11-25 15:45"
+          },
+          "duration": 135,
+          "airplane": "Boeing 737",
+          "airline": "United",
+          "airline_logo": "https://www.gstatic.com/flights/airline_logos/70px/UA.png",
+          "travel_class": "Economy",
+          "flight_number": "UA 1503",
+          "legroom": "30 in",
+          "extensions": [
+            "Average legroom (30 in)",
+            "basic economy fare: no changes"
+          ]
+        }
+      ],
+      "total_duration": 135,
+      "carbon_emissions": {
+        "this_flight": 180000,
+        "typical_for_this_route": 190000,
+        "difference_percent": -5
+      },
+      "price": 139,
+      "type": "Round trip",
+      "airline_logo": "https://www.gstatic.com/flights/airline_logos/70px/multi.png",
+      "departure_token": "tok-139-135"
+    }
+  ]
+}

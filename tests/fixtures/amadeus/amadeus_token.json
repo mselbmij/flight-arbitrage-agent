@@ -1,0 +1,11 @@
+{
+  "type": "amadeusOAuth2Token",
+  "username": "fixture@example.invalid",
+  "application_name": "fixture-app",
+  "client_id": "fixture-client-id",
+  "token_type": "Bearer",
+  "access_token": "tok-fixture-0001",
+  "expires_in": 1799,
+  "state": "approved",
+  "scope": ""
+}

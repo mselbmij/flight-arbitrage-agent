@@ -1,0 +1,186 @@
+{
+  "search_metadata": {
+    "id": "fx-unknown-airport",
+    "status": "Success",
+    "created_at": "2026-10-17 12:00:01 UTC",
+    "processed_at": "2026-10-17 12:00:03 UTC",
+    "google_flights_url": "https://www.google.com/travel/flights?q=fixture-fx-unknown-airport",
+    "raw_html_file": "https://serpapi.com/searches/fx-unknown-airport.html",
+    "total_time_taken": 2.1
+  },
+  "search_parameters": {
+    "engine": "google_flights",
+    "hl": "en",
+    "gl": "us",
+    "departure_id": "SEA",
+    "arrival_id": "SJC",
+    "outbound_date": "2026-11-25",
+    "return_date": "2026-11-29",
+    "travel_class": "1",
+    "currency": "USD",
+    "exclude_basic": "true"
+  },
+  "best_flights": [
+    {
+      "flights": [
+        {
+          "departure_airport": {
+            "name": "SEA airport",
+            "id": "SEA",
+            "time": "2026-11-25 07:15"
+          },
+          "arrival_airport": {
+            "name": "SJC airport",
+            "id": "SJC",
+            "time": "2026-11-25 09:25"
+          },
+          "duration": 130,
+          "airplane": "Boeing 737",
+          "airline": "Alaska",
+          "airline_logo": "https://www.gstatic.com/flights/airline_logos/70px/AS.png",
+          "travel_class": "Economy",
+          "flight_number": "AS 327",
+          "legroom": "30 in",
+          "extensions": [
+            "Average legroom (30 in)"
+          ]
+        }
+      ],
+      "total_duration": 130,
+      "carbon_emissions": {
+        "this_flight": 180000,
+        "typical_for_this_route": 190000,
+        "difference_percent": -5
+      },
+      "price": 214,
+      "type": "Round trip",
+      "airline_logo": "https://www.gstatic.com/flights/airline_logos/70px/multi.png",
+      "departure_token": "tok-214-130"
+    },
+    {
+      "flights": [
+        {
+          "departure_airport": {
+            "name": "SEA airport",
+            "id": "SEA",
+            "time": "2026-11-25 08:00"
+          },
+          "arrival_airport": {
+            "name": "ZZZ airport",
+            "id": "ZZZ",
+            "time": "2026-11-25 10:00"
+          },
+          "duration": 120,
+          "airplane": "Airbus A220",
+          "airline": "Delta",
+          "airline_logo": "https://www.gstatic.com/flights/airline_logos/70px/DL.png",
+          "travel_class": "Economy",
+          "flight_number": "DL 100",
+          "legroom": "30 in",
+          "extensions": [
+            "Average legroom (30 in)"
+          ]
+        },
+        {
+          "departure_airport": {
+            "name": "ZZZ airport",
+            "id": "ZZZ",
+            "time": "2026-11-25 11:30"
+          },
+          "arrival_airport": {
+            "name": "SJC airport",
+            "id": "SJC",
+            "time": "2026-11-25 13:00"
+          },
+          "duration": 90,
+          "airplane": "Airbus A220",
+          "airline": "Delta",
+          "airline_logo": "https://www.gstatic.com/flights/airline_logos/70px/DL.png",
+          "travel_class": "Economy",
+          "flight_number": "DL 101",
+          "legroom": "30 in",
+          "extensions": [
+            "Average legroom (30 in)"
+          ]
+        }
+      ],
+      "layovers": [
+        {
+          "duration": 90,
+          "name": "Nowhere Intl",
+          "id": "ZZZ"
+        }
+      ],
+      "total_duration": 300,
+      "carbon_emissions": {
+        "this_flight": 180000,
+        "typical_for_this_route": 190000,
+        "difference_percent": -5
+      },
+      "price": 199,
+      "type": "Round trip",
+      "airline_logo": "https://www.gstatic.com/flights/airline_logos/70px/multi.png",
+      "departure_token": "tok-199-300"
+    }
+  ],
+  "other_flights": [
+    {
+      "flights": [
+        {
+          "departure_airport": {
+            "name": "SEA airport",
+            "id": "SEA",
+            "time": "2026-11-25 18:00"
+          },
+          "arrival_airport": {
+            "name": "SJC airport",
+            "id": "SJC",
+            "time": "2026-11-25 20:15"
+          },
+          "duration": 135,
+          "airplane": "Airbus A321",
+          "airline": "Delta",
+          "airline_logo": "https://www.gstatic.com/flights/airline_logos/70px/DL.png",
+          "travel_class": "Economy",
+          "flight_number": "DL 2540",
+          "legroom": "30 in",
+          "extensions": [
+            "Average legroom (30 in)"
+          ]
+        }
+      ],
+      "total_duration": 135,
+      "carbon_emissions": {
+        "this_flight": 180000,
+        "typical_for_this_route": 190000,
+        "difference_percent": -5
+      },
+      "price": 241,
+      "type": "Round trip",
+      "airline_logo": "https://www.gstatic.com/flights/airline_logos/70px/multi.png",
+      "departure_token": "tok-241-135"
+    }
+  ],
+  "price_insights": {
+    "lowest_price": 199,
+    "price_level": "typical",
+    "typical_price_range": [
+      190,
+      260
+    ],
+    "price_history": [
+      [
+        1760000000,
+        230
+      ],
+      [
+        1760086400,
+        221
+      ],
+      [
+        1760172800,
+        214
+      ]
+    ]
+  }
+}

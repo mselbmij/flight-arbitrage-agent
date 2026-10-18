@@ -1,0 +1,19 @@
+{
+  "search_metadata": {
+    "id": "fx-error",
+    "status": "Error",
+    "created_at": "2026-10-17 12:00:01 UTC"
+  },
+  "search_parameters": {
+    "engine": "google_flights",
+    "hl": "en",
+    "gl": "us",
+    "departure_id": "SEA",
+    "arrival_id": "SJC",
+    "outbound_date": "2026-11-25",
+    "return_date": "2026-11-29",
+    "travel_class": "1",
+    "currency": "USD"
+  },
+  "error": "Invalid API key. Your API key should be here: https://serpapi.com/manage-api-key"
+}

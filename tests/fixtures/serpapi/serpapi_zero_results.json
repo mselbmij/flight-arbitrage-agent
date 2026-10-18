@@ -1,0 +1,45 @@
+{
+  "search_metadata": {
+    "id": "fx-zero",
+    "status": "Success",
+    "created_at": "2026-10-17 12:00:01 UTC",
+    "processed_at": "2026-10-17 12:00:03 UTC",
+    "google_flights_url": "https://www.google.com/travel/flights?q=fixture-fx-zero",
+    "raw_html_file": "https://serpapi.com/searches/fx-zero.html",
+    "total_time_taken": 2.1
+  },
+  "search_parameters": {
+    "engine": "google_flights",
+    "hl": "en",
+    "gl": "us",
+    "departure_id": "SEA",
+    "arrival_id": "SJC",
+    "outbound_date": "2026-11-25",
+    "return_date": "2026-11-29",
+    "travel_class": "1",
+    "currency": "USD",
+    "exclude_basic": "true"
+  },
+  "price_insights": {
+    "lowest_price": 205,
+    "price_level": "high",
+    "typical_price_range": [
+      190,
+      260
+    ],
+    "price_history": [
+      [
+        1760000000,
+        230
+      ],
+      [
+        1760086400,
+        221
+      ],
+      [
+        1760172800,
+        214
+      ]
+    ]
+  }
+}

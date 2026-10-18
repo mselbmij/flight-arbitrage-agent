@@ -1,0 +1,149 @@
+{
+  "search_metadata": {
+    "id": "fx-coterminal",
+    "status": "Success",
+    "created_at": "2026-10-17 12:00:01 UTC",
+    "processed_at": "2026-10-17 12:00:03 UTC",
+    "google_flights_url": "https://www.google.com/travel/flights?q=fixture-fx-coterminal",
+    "raw_html_file": "https://serpapi.com/searches/fx-coterminal.html",
+    "total_time_taken": 2.1
+  },
+  "search_parameters": {
+    "engine": "google_flights",
+    "hl": "en",
+    "gl": "us",
+    "departure_id": "SEA",
+    "arrival_id": "BOS",
+    "outbound_date": "2027-03-12",
+    "travel_class": "1",
+    "currency": "USD",
+    "exclude_basic": "true"
+  },
+  "best_flights": [
+    {
+      "flights": [
+        {
+          "departure_airport": {
+            "name": "SEA airport",
+            "id": "SEA",
+            "time": "2027-03-12 08:00"
+          },
+          "arrival_airport": {
+            "name": "BOS airport",
+            "id": "BOS",
+            "time": "2027-03-12 16:30"
+          },
+          "duration": 330,
+          "airplane": "Boeing 737",
+          "airline": "Alaska",
+          "airline_logo": "https://www.gstatic.com/flights/airline_logos/70px/AS.png",
+          "travel_class": "Economy",
+          "flight_number": "AS 18",
+          "legroom": "30 in",
+          "extensions": [
+            "Average legroom (30 in)"
+          ]
+        }
+      ],
+      "total_duration": 330,
+      "carbon_emissions": {
+        "this_flight": 180000,
+        "typical_for_this_route": 190000,
+        "difference_percent": -5
+      },
+      "price": 389,
+      "type": "One way",
+      "airline_logo": "https://www.gstatic.com/flights/airline_logos/70px/multi.png",
+      "departure_token": "tok-389-330"
+    }
+  ],
+  "other_flights": [
+    {
+      "flights": [
+        {
+          "departure_airport": {
+            "name": "SEA airport",
+            "id": "SEA",
+            "time": "2027-03-12 07:10"
+          },
+          "arrival_airport": {
+            "name": "EWR airport",
+            "id": "EWR",
+            "time": "2027-03-12 15:35"
+          },
+          "duration": 325,
+          "airplane": "Boeing 757",
+          "airline": "United",
+          "airline_logo": "https://www.gstatic.com/flights/airline_logos/70px/UA.png",
+          "travel_class": "Economy",
+          "flight_number": "UA 1230",
+          "legroom": "30 in",
+          "extensions": [
+            "Average legroom (30 in)"
+          ]
+        },
+        {
+          "departure_airport": {
+            "name": "JFK airport",
+            "id": "JFK",
+            "time": "2027-03-12 17:30"
+          },
+          "arrival_airport": {
+            "name": "BOS airport",
+            "id": "BOS",
+            "time": "2027-03-12 18:40"
+          },
+          "duration": 70,
+          "airplane": "Embraer 175",
+          "airline": "Delta",
+          "airline_logo": "https://www.gstatic.com/flights/airline_logos/70px/DL.png",
+          "travel_class": "Economy",
+          "flight_number": "DL 5512",
+          "legroom": "30 in",
+          "extensions": [
+            "Average legroom (30 in)"
+          ]
+        }
+      ],
+      "layovers": [
+        {
+          "duration": 115,
+          "name": "Newark Liberty International Airport",
+          "id": "EWR"
+        }
+      ],
+      "total_duration": 570,
+      "carbon_emissions": {
+        "this_flight": 180000,
+        "typical_for_this_route": 190000,
+        "difference_percent": -5
+      },
+      "price": 305,
+      "type": "One way",
+      "airline_logo": "https://www.gstatic.com/flights/airline_logos/70px/multi.png",
+      "departure_token": "tok-305-570"
+    }
+  ],
+  "price_insights": {
+    "lowest_price": 305,
+    "price_level": "low",
+    "typical_price_range": [
+      340,
+      420
+    ],
+    "price_history": [
+      [
+        1760000000,
+        230
+      ],
+      [
+        1760086400,
+        221
+      ],
+      [
+        1760172800,
+        214
+      ]
+    ]
+  }
+}
