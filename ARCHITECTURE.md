@@ -113,6 +113,10 @@ Watchlists and targets are **not** tables. Watchlists live in YAML and are the s
 `target_id = "{watchlist_id}:{ORIG}{DEST}:{depart}:{return|ow}"`, so observations survive YAML edits
 that don't change the leg. `config_hash` on each observation records which rules judged it.
 
+Storage rules: money INTEGER cents; enums as their string values; datetimes as tz-aware ISO text,
+naive input rejected at the boundary; `itinerary` as JSON (`itinerary_key` excluded, it is
+recomputed); `risk` flattened to four nullable columns, all-NULL when the verdict is absent.
+
 ### Why these choices
 
 * **Integer cents.** `$418.00` is `41800`. Float money is a bug waiting for a reviewer.
@@ -169,11 +173,15 @@ Rules the engine must honour:
   when `fare_brand_raw` is non-null; otherwise no alert.
 * `ceiling_cents` is an absolute strike in every regime: price ≤ ceiling always alerts.
 * The strike reference `lowest_seen` is the min `price_cents` of **risk-passed** observations
-  for that **target**, provider-independent. It is the only internal statistic allowed.
+  with a **verified brand** (`risk_brand_unverified = 0`) for that **target**, provider-independent.
+  It is the only internal statistic allowed. It is provider-independent, which is why synthetic and
+  test-host data must never share a DB with live data (see §7 seed isolation).
 * `alert_key` = `f"{target_id}:{kind}:{itinerary_key or '-'}:{price_bucket}"` where
   `price_bucket = price_cents // 1000`. Same key within `dedup_window_hours` (default 24) is not
-  inserted (`Database.insert_alert` returns None). The key is not unique over all time — the same
-  fare can legitimately re-alert a day later.
+  inserted (`Database.insert_alert` returns None). The window is measured from the new alert's
+  `created_at`; a prior alert exactly `dedup_window_hours` old does **not** suppress a repeat
+  (strict `>`), and §7a's retry window uses the same boundary. The key is not unique over all
+  time — the same fare can legitimately re-alert a day later.
   Watchlist-level kinds (`BUDGET_TRIPPED`) use `watchlist_id` in place of `target_id`.
 * `FENCE_WARNING` fires once per target, the first run after that target's DTD crosses 21. For a
   grid, the alert names the target and how many siblings are still in PRIME.
@@ -214,7 +222,10 @@ class FlightProvider(Protocol):
 
 Each client is responsible for: mapping its raw brand strings onto `FareBrand` (table in the
 client, extended as `fare_brand_raw` values show up in the DB), producing tz-aware local segment
-times, and raising `ProviderError` rather than returning partial data. The runner, not the
+times, and raising `ProviderError` rather than returning partial data. Any parse or validation
+failure surfaces as `ProviderError(retryable=False)`; a raw exception after a paid call would
+leave the ledger row `ok` and crash the run. Clients never pre-fill `risk` — the verdict belongs to
+`risk_filters.py` — and always stamp `watchlist_id`/`target_id` from the requested target. The runner, not the
 client, logs the `ApiCall` and consults the breaker.
 
 * **SerpAPI (Google Flights).** Primary. Supplies the benchmark band (`price_insights`). Brand
@@ -264,10 +275,24 @@ refreshes each target every `ceil(N / 2k)` days and costs `2k` calls/day per pro
 example config asks for 12/day; SerpAPI's free tier (100/month) covers 3. Flexible grids are
 a paid-tier feature, or a one-target-at-a-time feature. Pick before Phase 4.
 
-`fares seed` populates `fares.db` from fixtures (45 days, with a 21-day jump and a Basic Economy
-trap). `fares targets [watchlist_id]` prints the expanded grid with each target's regime and
+**Seed isolation.** `fares seed` writes synthetic history (45 days per target, with a dip day, a
+Basic Economy trap and the 21/14 fence steps, clamped into whatever DTD range the target has) to
+**`data/seed.db`**, never `FARES_DB_PATH`, and refuses the live path without `--allow-live-db`.
+With no `--config` it generates three demo watchlists whose departures sit 10, 30 and 75 days out
+from `--end` (so all regimes appear) and writes them to `config/watchlists.demo.yaml`; the Phase 3
+dashboard is pointed at that pair. Seed rows carry `provider=mock`, `trigger=seed`,
+`cost_units=0`; `fares seed --replace` deletes them (cascade) before regenerating, and `fares seed`
+refuses to run on top of existing seed rows without it.
+
+`fares targets [watchlist_id]` prints the expanded grid with each target's regime and
 last-polled time. `fares key <observation_id>` prints that observation's `itinerary_key` and
 `target_id` so you can paste both into `purchase:`.
+
+**Clocks.** The DB boundary rejects naive datetimes (`ValueError`); every stamp is tz-aware and
+stored as UTC ISO text. `days_to_departure` is computed from the **UTC** date, so an evening
+Pacific poll (00:20Z next day) reads one day lower than the morning poll on the same local day.
+That errs early on the 65/21/14 fences, which is the conservative direction; it is documented
+here rather than fixed with a per-airport timezone table.
 
 ## 7a. Alerts (src/alerts/notifier.py)
 
@@ -302,7 +327,9 @@ Rules:
 
 ## 8. Dashboard (dashboard/app.py)
 
-Streamlit + Plotly, read-only against `fares.db`. Three views, per watchlist:
+Streamlit + Plotly, read-only against a DB + watchlist YAML pair (`data/seed.db` +
+`config/watchlists.demo.yaml` during development, `data/fares.db` + `config/watchlists.yaml` live).
+Three views, per watchlist:
 
 1. **Price vs time** — risk-passed observations as points, rejected as hollow points, the
    benchmark band as a shaded ribbon, ceiling as a dashed line. No Bollinger bands.
