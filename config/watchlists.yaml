@@ -15,10 +15,12 @@ defaults:
   cabin: economy
   currency: USD
 
+  # BUDGET: SerpAPI free tier = 100/month ≈ 3/day. The shipped watchlists sum to exactly 3.
+  # Adding a watchlist means lowering another's poll, or paying. `fares budget` tells you.
   poll:
-    times_per_day: 2            # ATPCO refiles a few times a day; more than 3 is waste
+    times_per_day: 1            # ATPCO refiles a few times a day; 1/day is the free-tier reality
     providers: [serpapi]        # amadeus added in Phase 4 once branded-fare mapping is tested
-    targets_per_run: 2          # × providers × times_per_day = calls/day for this watchlist
+    targets_per_run: 1          # × providers × times_per_day = calls/day for this watchlist
     scan_provider: null         # amadeus cheapest-date scan, Phase 4; one call per O-D pair
 
   constraints:
@@ -54,11 +56,13 @@ watchlists:
     return: 2026-11-29
     ceiling_cents: 32000
     status: watching
+    poll: { times_per_day: 2, providers: [serpapi], targets_per_run: 1, scan_provider: null }
     notes: Family trip. Alaska or Delta preferred; Southwest fine if bags matter.
 
   # Flexible destination + trip length: SEA → any Bay Area airport, leave Thu or Fri
   # in a one-week window, stay 3–4 nights.  3 dests × 2 dates × 2 lengths = 12 targets.
-  # At targets_per_run=3, 2×/day, every target is refreshed every 2 days.
+  # On the free tier (1 call/day here) each target is refreshed every 12 days — a grid this
+  # wide is really a paid-tier feature; it stays as the worked example.
   - id: sea-bayarea-jan-flex
     origin: SEA
     destination: [SJC, SFO, OAK]
@@ -66,11 +70,7 @@ watchlists:
     trip_length: { min_days: 3, max_days: 4 }
     ceiling_cents: 24000
     status: watching
-    poll:
-      times_per_day: 2
-      providers: [serpapi]
-      targets_per_run: 3
-      scan_provider: null
+    poll: { times_per_day: 1, providers: [serpapi], targets_per_run: 1, scan_provider: null }
 
   # Fixed dates, nonstop only, carrier-restricted. 1 target.
   - id: sea-ord-jan
@@ -79,7 +79,7 @@ watchlists:
     depart: 2027-01-14
     return: 2027-01-18
     ceiling_cents: 38000
-    status: watching
+    status: paused              # over budget on the free tier; flip to watching when it matters
     constraints:
       allow_basic_economy: false
       max_stops: 0
@@ -91,20 +91,21 @@ watchlists:
       allowed_carriers: [AS, UA]
       excluded_carriers: []
 
-  # Post-purchase example. A purchase pins ONE target_id; only that target is polled.
-  # Replace with a real purchase or delete.
-  - id: sea-jfk-march
-    origin: SEA
-    destination: [JFK, EWR]
-    depart: 2027-03-12
-    return: 2027-03-16
-    ceiling_cents: 45000
-    status: purchased
-    purchase:
-      purchased_at: 2026-10-15T09:30:00-07:00
-      price_cents: 41800
-      currency: USD
-      itinerary_key: 0123456789abcdef          # from the observation you bought; `fares key <obs id>`
-      target_id: sea-jfk-march:SEAJFK:2027-03-12:2027-03-16
-      carrier: DL
-      changeable: true
+  # Post-purchase example (commented out: a purchased watchlist polls its target every run,
+  # which the free tier can't spare). A purchase pins ONE target_id; uncomment and fill in
+  # from `fares key <observation_id>` when you buy.
+  # - id: sea-jfk-march
+  #   origin: SEA
+  #   destination: [JFK, EWR]
+  #   depart: 2027-03-12
+  #   return: 2027-03-16
+  #   ceiling_cents: 45000
+  #   status: purchased
+  #   purchase:
+  #     purchased_at: 2026-10-15T09:30:00-07:00
+  #     price_cents: 41800
+  #     currency: USD
+  #     itinerary_key: 0123456789abcdef          # from the observation you bought; `fares key <obs id>`
+  #     target_id: sea-jfk-march:SEAJFK:2027-03-12:2027-03-16
+  #     carrier: DL
+  #     changeable: true
